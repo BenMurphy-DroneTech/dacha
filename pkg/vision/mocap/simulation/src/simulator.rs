@@ -529,7 +529,7 @@ struct SimulatedMocapCamera {
 }
 
 #[async_trait]
-impl MocapCameraService for SimulatedMocapCamera {
+impl CameraService for SimulatedMocapCamera {
 
     async fn Status(
         &self,

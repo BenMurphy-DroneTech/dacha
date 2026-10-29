@@ -40,6 +40,10 @@
 #include <linux/dma-heap.h>
 #include <linux/dma-buf.h>
 
+// glibc 2.40+ has <sys/epoll.h> include <sys/ioctl.h>, whose struct winsize and termio
+// clash with the kernel ones from <linux/termios.h> above; the _IOW macros epoll needs
+// already come from <linux/ioctl.h>.
+#define _SYS_IOCTL_H 1
 #include <sys/epoll.h>
 #include <dirent.h>
 // #include <pthread.h>

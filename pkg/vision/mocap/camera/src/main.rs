@@ -18,6 +18,31 @@ use mocap_camera::MocapCamera;
 use mocap_camera_core::CameraHardwareConfigContainer;
 use protobuf::StaticMessage;
 
+/// The route (index and IPv4 address) of the network interface with the given name.
+async fn interface_route(name: &str) -> Result<net::route::NetworkInterfaceRoute> {
+    for iface in net_iface::NetworkInterface::list().await? {
+        if iface.name != name {
+            continue;
+        }
+
+        for addr in &iface.addrs {
+            if let net_iface::NetworkInterfaceAddr::IP(ip) = &addr.addr {
+                if let net::ip::IPAddress::V4(_) = ip {
+                    return Ok(net::route::NetworkInterfaceRoute {
+                        name: iface.name.clone(),
+                        addr: ip.clone(),
+                        index: iface.index,
+                    });
+                }
+            }
+        }
+
+        return Err(format_err!("Network interface {} has no IPv4 address", name));
+    }
+
+    Err(format_err!("No network interface named {}", name))
+}
+
 /*
 
 # Local Testing
@@ -164,7 +189,7 @@ async fn main() -> Result<()> {
             &hardware_config.ptp_interface()
         ).await?;
 
-        let basic_node = ptp_core::BasicTimeNode::create("0.0.0.0:400".parse()?, &hardware_config.ptp_interface()).await?;
+        let basic_node = ptp_core::BasicTimeNode::create("0.0.0.0:400".parse()?, interface_route(&hardware_config.ptp_interface()).await?).await?;
 
         // TODO: Implement an offset if we are using CM5 / Pi 5
         let time_sync = Arc::new(ptp::TimeSyncNode::create(/* client.clone(), */ ptp_device.clone(), ptp_socket, Arc::new(basic_node)).await);

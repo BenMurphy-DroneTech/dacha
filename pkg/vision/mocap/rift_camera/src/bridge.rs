@@ -129,6 +129,22 @@ impl Bridge {
         Ok(())
     }
 
+    /// Enough of open_links for AR0134 register reads alone (selector 2), so a
+    /// diagnostic never touches the SPI selectors while the stream runs.
+    pub fn open_i2c(&mut self) -> Result<()> {
+        self.len[SEL_I2C as usize] = self.get_len(SEL_I2C)?;
+        Ok(())
+    }
+
+    /// Switches the sensor to free-running (reset_register 0x301a: trigger
+    /// input off, streaming on), so frames arrive without the beacon. Returns
+    /// reset_register before the change. The next sync setup undoes it.
+    pub fn free_run(&mut self) -> Result<u16> {
+        let r = self.ar_read(0x301a)?;
+        self.ar_write(0x301a, (r & !(1 << 8)) | (1 << 2))?;
+        Ok(r)
+    }
+
     // ---- eSP770U registers ----
 
     fn esp_read(&self, reg: u8) -> Result<u8> {

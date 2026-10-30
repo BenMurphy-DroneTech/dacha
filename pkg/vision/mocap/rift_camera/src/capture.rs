@@ -210,6 +210,31 @@ async fn stream(config: &RiftCameraConfig, options: &CaptureOptions, counters: &
                 if total.frames > 0 {
                     println!("stream total: {}", total.report(&config.serial, started.elapsed()));
                 }
+                // Not triggered, or lost on the way? Switch the sensor to
+                // free-running and see whether frames come through.
+                let free = {
+                    let path = path.clone();
+                    run_blocking(move || -> Result<_> {
+                        let mut bridge = Bridge::open(&path)?;
+                        bridge.open_i2c()?;
+                        bridge.free_run()
+                    }).await?
+                };
+                match free {
+                    Ok(reset) => {
+                        let mut n = 0;
+                        let deadline = Instant::now() + Duration::from_secs(1);
+                        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+                            match executor::timeout(left, stream.dequeue_buffer_with_errors()).await {
+                                Ok(Ok(b)) => { n += 1; stream.enqueue_buffer(b).await?; }
+                                _ => break,
+                            }
+                        }
+                        println!("{}: stalled: reset_register was 0x{:04x}; free-running gave {} frames in 1 s",
+                                 config.serial, reset, n);
+                    }
+                    Err(e) => println!("{}: stalled: free-running check failed: {}", config.serial, e),
+                }
                 return Err(format_err!("No frame for {:?}", FRAME_TIMEOUT));
             }
         };

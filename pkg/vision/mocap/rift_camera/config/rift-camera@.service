@@ -8,8 +8,9 @@
 
 [Unit]
 Description=Rift CV1 camera %i for dacha mocap
-After=network-online.target
-Wants=network-online.target
+# Frames are numbered on rift-grid's beacon grid.
+After=network-online.target rift-grid.service
+Wants=network-online.target rift-grid.service
 
 [Service]
 User=ben

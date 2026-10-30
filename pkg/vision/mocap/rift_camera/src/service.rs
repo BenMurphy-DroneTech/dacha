@@ -1,22 +1,25 @@
 //! dacha's Camera service for one Rift sensor. Status and Configure keep the
 //! manager's config (it re-sends it whenever the epoch differs); exposure and
-//! gain stay fixed at the crop's 188 us and 2x. ReadBlobs streams nothing
-//! until blob detection lands (first milestone step 5).
+//! gain stay fixed at the crop's 188 us and 2x. ReadBlobs streams one
+//! response per frame placed on the beacon grid, with no blobs until blob
+//! detection lands (first milestone step 5).
 
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
 
 use common::errors::*;
+use executor_multitask::BroadcastChannel;
 use mocap_proto::mocap::*;
 
 use crate::config::*;
 
 pub struct RiftCameraService {
     status: Mutex<MocapCameraStatus>,
+    blobs: Arc<BroadcastChannel<ReadBlobsResponse>>,
 }
 
 impl RiftCameraService {
-    pub fn new(config: &RiftCameraConfig, period_us: u32, exposure_us: f64) -> Self {
+    pub fn new(config: &RiftCameraConfig, period_us: u32, exposure_us: f64,
+               blobs: Arc<BroadcastChannel<ReadBlobsResponse>>) -> Self {
         let mut status = MocapCameraStatus::default();
 
         let sensor = status.sensor_mut();
@@ -34,7 +37,7 @@ impl RiftCameraService {
         c.set_exposure_micros(exposure_us as u32);
         c.set_pixel_threshold(35u32);
 
-        Self { status: Mutex::new(status) }
+        Self { status: Mutex::new(status), blobs }
     }
 }
 
@@ -68,9 +71,13 @@ impl CameraService for RiftCameraService {
         _request: rpc::ServerRequest<ReadBlobsRequest>,
         response: &mut rpc::ServerStreamResponse<ReadBlobsResponse>,
     ) -> Result<()> {
+        // As dacha's camera node: subscribe before the head, then pass every
+        // frame on (max_rate is only used by UI previews).
+        let mut subscriber = self.blobs.subscribe(1024);
         response.send_head().await?;
         loop {
-            executor::sleep(Duration::from_secs(3600)).await?;
+            let res = subscriber.recv().await?;
+            response.send(res).await?;
         }
     }
 

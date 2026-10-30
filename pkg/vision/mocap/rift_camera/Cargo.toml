@@ -3,9 +3,20 @@ name = "rift_camera"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "rift_camera"
 path = "src/main.rs"
+
+[[bin]]
+name = "rift_grid"
+path = "src/bin/rift_grid.rs"
+
+[[bin]]
+name = "rift_check"
+path = "src/bin/rift_check.rs"
 
 [dependencies]
 common = { path = "../../../common" }

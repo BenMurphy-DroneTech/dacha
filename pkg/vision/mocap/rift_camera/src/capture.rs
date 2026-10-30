@@ -14,9 +14,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::errors::*;
+use executor_multitask::BroadcastChannel;
+use mocap_proto::mocap::ReadBlobsResponse;
 
 use crate::bridge::Bridge;
 use crate::config::*;
+use crate::slots::{monotonic_ns, Slot, Slotter};
 
 /// Buffers queued in the driver: 4 frames (44 ms at 90 fps) of slack.
 const NUM_BUFFERS: usize = 4;
@@ -125,13 +128,15 @@ fn hw_timestamps_on() -> bool {
         .unwrap_or(false)
 }
 
-pub async fn run(config: RiftCameraConfig, options: CaptureOptions, counters: Arc<CaptureCounters>) -> Result<()> {
+pub async fn run(config: RiftCameraConfig, options: CaptureOptions, counters: Arc<CaptureCounters>,
+                 blobs: Arc<BroadcastChannel<ReadBlobsResponse>>) -> Result<()> {
     if !hw_timestamps_on() {
         eprintln!("warning: uvcvideo hwtimestamps is off; frame intervals will step by about 4 ms \
                    (echo 1 | sudo tee /sys/module/uvcvideo/parameters/hwtimestamps)");
     }
 
     let path = config.device_path();
+    let mut slotter = Slotter::new(&config.serial);
     loop {
         if !std::path::Path::new(&path).exists() {
             println!("{}: waiting for {}", config.serial, path);
@@ -142,7 +147,8 @@ pub async fn run(config: RiftCameraConfig, options: CaptureOptions, counters: Ar
             executor::sleep(Duration::from_secs(1)).await?;
         }
 
-        match stream(&config, &options, &counters).await {
+        slotter.restart();
+        match stream(&config, &options, &counters, &blobs, &mut slotter).await {
             Ok(()) => {}
             Err(e) => eprintln!("{}: {}", config.serial, e),
         }
@@ -152,7 +158,8 @@ pub async fn run(config: RiftCameraConfig, options: CaptureOptions, counters: Ar
 }
 
 /// One stretch of streaming, until the camera goes away or stalls.
-async fn stream(config: &RiftCameraConfig, options: &CaptureOptions, counters: &CaptureCounters) -> Result<()> {
+async fn stream(config: &RiftCameraConfig, options: &CaptureOptions, counters: &CaptureCounters,
+                blobs: &BroadcastChannel<ReadBlobsResponse>, slotter: &mut Slotter) -> Result<()> {
     let path = config.device_path();
     let frame_bytes = (FRAME_WIDTH * FRAME_HEIGHT) as usize;
 
@@ -251,6 +258,7 @@ async fn stream(config: &RiftCameraConfig, options: &CaptureOptions, counters: &
             continue;
         }
 
+        let dq_ns = monotonic_ns();
         let seq = buffer.sequence();
         let ts_ns = buffer.monotonic_timestamp().map(|t| t.as_nanos() as u64);
         let full = buffer.used_memory().len() == frame_bytes;
@@ -269,6 +277,19 @@ async fn stream(config: &RiftCameraConfig, options: &CaptureOptions, counters: &
             continue;
         }
 
+        // The frame's number on the beacon grid, then straight out to the
+        // manager (blobs land here in step 5).
+        if let (Some(ts), true) = (ts_ns, full) {
+            if let Slot::Publish(frame_timestamp) = slotter.place(ts as i64, dq_ns) {
+                if blobs.active() {
+                    let mut res = ReadBlobsResponse::default();
+                    res.set_frame_timestamp(frame_timestamp);
+                    res.new_cameras();
+                    blobs.send(res);
+                }
+            }
+        }
+
         let missed = stats.record(seq, ts_ns, full);
         total.record(seq, ts_ns, full);
         counters.frames.fetch_add(1, Ordering::Relaxed);
@@ -281,7 +302,7 @@ async fn stream(config: &RiftCameraConfig, options: &CaptureOptions, counters: &
 
         let now = Instant::now();
         if now >= next_report {
-            println!("{}", stats.report(&config.serial, now - window_start));
+            println!("{}; {}", stats.report(&config.serial, now - window_start), slotter.report());
             stats = FrameStats { last_ts_ns: stats.last_ts_ns, last_seq: stats.last_seq, ..FrameStats::new(period_ns) };
             window_start = now;
             next_report = now + REPORT_INTERVAL;

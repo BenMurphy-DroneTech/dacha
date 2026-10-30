@@ -8,8 +8,8 @@
 //!   rift_camera --config=pkg/vision/mocap/rift_camera/config/pi1.cfg --serial=WMTD305350189Q
 //!
 //! TimeSync is dacha's dummy node: four processes on one Pi can't all steer
-//! the Pi's PTP clock, and frames are numbered on the beacon grid instead
-//! (first milestone step 4).
+//! the Pi's PTP clock. Frames are numbered on the beacon grid instead, which
+//! rift_grid publishes in /dev/shm (see grid.rs and slots.rs).
 
 #[macro_use]
 extern crate common;
@@ -21,11 +21,12 @@ mod capture;
 mod config;
 mod mdns;
 mod service;
+mod slots;
 
 use std::sync::Arc;
 
 use common::errors::*;
-use executor_multitask::RootResource;
+use executor_multitask::{BroadcastChannel, RootResource};
 use mocap_proto::mocap::CameraIntoService;
 use ptp_proto::ptp::*;
 
@@ -81,7 +82,9 @@ async fn main() -> Result<()> {
     let mut server = rpc::Http2Server::new(Some(args.rpc_port));
     server.http_options_mut().ip = net::ip::IPAddress::V4(config.ip.octets());
 
-    let camera = Arc::new(service::RiftCameraService::new(&config, args.period_us, args.exposure_us as f64));
+    let blobs = Arc::new(BroadcastChannel::default());
+    let camera = Arc::new(service::RiftCameraService::new(&config, args.period_us, args.exposure_us as f64,
+                                                          blobs.clone()));
     server.add_service(camera.clone().into_service())?;
 
     let time_sync = Arc::new(ptp_core::DummyTimeSyncNode::create());
@@ -93,7 +96,7 @@ async fn main() -> Result<()> {
         exposure_us: args.exposure_us as f64,
         gain: args.gain,
     };
-    let _capture = executor::spawn(capture::run(config.clone(), options, counters.clone()));
+    let _capture = executor::spawn(capture::run(config.clone(), options, counters.clone(), blobs));
 
     service.register_dependency(server.start()).await;
 

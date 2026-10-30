@@ -1,0 +1,31 @@
+# The beacon grid daemon: one per Pi, rift-grid.service.
+#
+# rift_grid times the beacon's frame boundaries from the receiver XIAO's D10
+# flash on GPIO17 (it sends the receiver `led on`, `width 20`, `off 0` itself
+# whenever the edges stop) and publishes the grid to /dev/shm/rift_grid,
+# which the rift-camera@ nodes read to number their frames. rift-camera@
+# units want this one and start after it; the nodes also cope with a grid
+# that appears or goes stale later.
+#
+# Install on the Pi (from ~/dacha, after `cargo build --release --bin rift_grid`):
+#   sudo cp pkg/vision/mocap/rift_camera/config/rift-grid.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now rift-grid
+# Logs: journalctl -u rift-grid -f
+#
+# ben needs the gpio group (for /dev/gpiochip0) and dialout (for the
+# receiver's serial port).
+
+[Unit]
+Description=Beacon grid for the Rift CV1 camera nodes
+
+[Service]
+User=ben
+WorkingDirectory=/home/ben/dacha
+ExecStart=/home/ben/dacha/target/release/rift_grid --chip /dev/gpiochip0 --line 17
+Nice=-10
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

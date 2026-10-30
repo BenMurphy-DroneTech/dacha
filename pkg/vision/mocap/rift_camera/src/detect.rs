@@ -26,6 +26,9 @@ use crate::config::{FRAME_HEIGHT, FRAME_WIDTH};
 use crate::hotpix::{HotPixels, COLUMN_START};
 use crate::slots::monotonic_ns;
 
+/// Frames kept for the p99 in a report (10 s at 90 fps is 900).
+const PUBLISH_SAMPLES: usize = 2048;
+
 /// The blob filter for Rift markers down to 2.6 px (a 20 mm sphere at 5.5 m),
 /// from rift_blob_sim running synthetic markers through Dennis's
 /// FrameProcessor: only elliptical_area_error moves from dacha's 0.25 (which
@@ -90,6 +93,8 @@ pub struct Detector {
     process_ns_max: i64,
     publish_ns_sum: i64,
     publish_ns_max: i64,
+    /// Each frame's dequeue to publish, for the p99 (preallocated, never grown).
+    publish_ns: Vec<i64>,
 
     /// Save the next frame (before and after the hot-pixel repair) for a look.
     dump: Option<String>,
@@ -109,6 +114,7 @@ impl Detector {
             filter: BlobFilterConfig::default(),
             frames: 0, blobs: 0, rejected: 0,
             process_ns_sum: 0, process_ns_max: 0, publish_ns_sum: 0, publish_ns_max: 0,
+            publish_ns: Vec::with_capacity(PUBLISH_SAMPLES),
             dump: None,
         }
     }
@@ -176,6 +182,9 @@ impl Detector {
     pub fn published(&mut self, dq_to_publish_ns: i64) {
         self.publish_ns_sum += dq_to_publish_ns;
         self.publish_ns_max = self.publish_ns_max.max(dq_to_publish_ns);
+        if self.publish_ns.len() < PUBLISH_SAMPLES {
+            self.publish_ns.push(dq_to_publish_ns);
+        }
     }
 
     /// Arms a dump of the next detected frame if /dev/shm/rift_dump_<serial>
@@ -187,17 +196,26 @@ impl Detector {
         }
     }
 
+    fn publish_p99(&mut self) -> i64 {
+        if self.publish_ns.is_empty() {
+            return 0;
+        }
+        self.publish_ns.sort_unstable();
+        self.publish_ns[(self.publish_ns.len() - 1) * 99 / 100]
+    }
+
     pub fn report(&mut self) -> String {
         let n = self.frames.max(1) as f64;
         let line = if self.frames == 0 {
             "blobs: idle (no subscribers)".to_string()
         } else {
             format!(
-                "blobs: {:.2} per frame, {:.1} rejected; detect {:.0} us mean, {:.0} max; dequeue to publish {:.0} us mean, {:.0} max",
+                "blobs: {:.2} per frame, {:.1} rejected; detect {:.0} us mean, {:.0} max; dequeue to publish {:.0} us mean, {:.0} max, {:.0} p99",
                 self.blobs as f64 / n, self.rejected as f64 / n,
                 self.process_ns_sum as f64 / n / 1e3, self.process_ns_max as f64 / 1e3,
-                self.publish_ns_sum as f64 / n / 1e3, self.publish_ns_max as f64 / 1e3)
+                self.publish_ns_sum as f64 / n / 1e3, self.publish_ns_max as f64 / 1e3, self.publish_p99() as f64 / 1e3)
         };
+        self.publish_ns.clear();
         self.frames = 0;
         self.blobs = 0;
         self.rejected = 0;

@@ -1,29 +1,34 @@
 //! dacha's Camera service for one Rift sensor. Status and Configure keep the
 //! manager's config (it re-sends it whenever the epoch differs); exposure and
 //! gain stay fixed at the crop's 188 us and 2x. ReadBlobs streams one
-//! response per frame placed on the beacon grid, with no blobs until blob
-//! detection lands (first milestone step 5).
+//! response per frame placed on the beacon grid; ReadFrames streams the MJPEG
+//! previews (preview.rs).
 
 use std::sync::{Arc, Mutex};
 
+use common::bytes::Bytes;
 use common::errors::*;
 use executor_multitask::BroadcastChannel;
 use mocap_proto::mocap::*;
 
 use crate::config::*;
 use crate::detect::BlobSettings;
+use crate::preview::PreviewSettings;
 use vision_proto::vision::CameraIntrinsicsModelProto;
 
 pub struct RiftCameraService {
     status: Mutex<MocapCameraStatus>,
     blobs: Arc<BroadcastChannel<ReadBlobsResponse>>,
     settings: Arc<BlobSettings>,
+    frames: Arc<BroadcastChannel<Bytes>>,
+    preview: Arc<PreviewSettings>,
 }
 
 impl RiftCameraService {
     pub fn new(config: &RiftCameraConfig, period_us: u32, exposure_us: f64,
                blobs: Arc<BroadcastChannel<ReadBlobsResponse>>, settings: Arc<BlobSettings>,
-               threshold: u32, filter: BlobFilterConfig) -> Self {
+               threshold: u32, filter: BlobFilterConfig,
+               frames: Arc<BroadcastChannel<Bytes>>, preview: Arc<PreviewSettings>, mjpeg: MJPEGEncoderConfig) -> Self {
         let mut status = MocapCameraStatus::default();
 
         let sensor = status.sensor_mut();
@@ -41,8 +46,9 @@ impl RiftCameraService {
         c.set_exposure_micros(exposure_us as u32);
         c.set_pixel_threshold(threshold);
         c.set_blob_filter(filter);
+        c.set_mjpeg(mjpeg);
 
-        Self { status: Mutex::new(status), blobs, settings }
+        Self { status: Mutex::new(status), blobs, settings, frames, preview }
     }
 }
 
@@ -77,6 +83,7 @@ impl CameraService for RiftCameraService {
         config.set_exposure_micros(status.config().exposure_micros());
         // Dennis's blob detection takes the threshold and filter from here.
         self.settings.set(config.pixel_threshold(), config.blob_filter().clone());
+        self.preview.set(config.pixel_threshold(), config.mjpeg().clone());
         status.set_config(config);
         Ok(())
     }
@@ -99,9 +106,16 @@ impl CameraService for RiftCameraService {
     async fn ReadFrames(
         &self,
         _request: rpc::ServerRequest<ReadFramesRequest>,
-        _response: &mut rpc::ServerStreamResponse<ReadFramesResponse>,
+        response: &mut rpc::ServerStreamResponse<ReadFramesResponse>,
     ) -> Result<()> {
-        Ok(())
+        // As dacha's camera node.
+        let mut subscriber = self.frames.subscribe(8);
+        loop {
+            let frame = subscriber.recv().await?;
+            let mut res = ReadFramesResponse::default();
+            res.set_mjpeg(&frame[..]);
+            response.send(res).await?;
+        }
     }
 
     async fn FlashMCU(

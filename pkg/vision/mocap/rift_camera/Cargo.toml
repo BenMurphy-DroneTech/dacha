@@ -44,5 +44,6 @@ ptp_proto = { path = "../../../net/ptp/proto" }
 v4l2 = { path = "../../../media/v4l2" }
 mocap_proto = { path = "../proto" }
 mocap_camera_core = { path = "../camera/core" }
+image = { path = "../../../image" }
 vision_proto = { path = "../../proto" }
 libc = "0.2"

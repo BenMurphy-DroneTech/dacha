@@ -11,8 +11,12 @@
 //! It also reports each node's blobs per frame (mean, min, max, a histogram
 //! of 0..5+) and their mean radius.
 //!
-//!   rift_check [--seconds 60] [--blink[=CMD]] [--blink-every 3]
+//!   rift_check [--seconds 60] [--frames] [--blink[=CMD]] [--blink-every 3]
 //!              [169.254.10.1 169.254.10.2 ...]
+//!
+//! --frames also subscribes to each node's ReadFrames (the MJPEG previews),
+//! reports their rate and size, and keeps node N's latest JPEG in
+//! /dev/shm/rift_preview_N.jpg.
 //!
 //! --blink sends CMD (default `blink 0`: every band leaves channel 0, D10,
 //! dark in one frame 30 frames ahead) to the band receiver's serial port
@@ -96,6 +100,16 @@ struct BlinkSent {
 struct Shared {
     nodes: Vec<Mutex<NodeLog>>,
     blinks: Mutex<Vec<BlinkSent>>,
+    previews: Vec<Mutex<PreviewLog>>,
+}
+
+#[derive(Default)]
+struct PreviewLog {
+    count: u64,
+    bytes: u64,
+    first: Option<Instant>,
+    last: Option<Instant>,
+    error: Option<String>,
 }
 
 async fn connect(endpoint: &str) -> Result<Arc<CameraStub>> {
@@ -148,6 +162,30 @@ async fn read_blobs_inner(shared: &Shared, index: usize, endpoint: &str) -> Resu
         node.blobs.push(fb);
     }
 
+    res_stream.finish().await?;
+    Ok(())
+}
+
+async fn read_frames(shared: Arc<Shared>, index: usize, endpoint: String) {
+    if let Err(e) = read_frames_inner(&shared, index, &endpoint).await {
+        shared.previews[index].lock().unwrap().error = Some(format!("{}", e));
+    }
+}
+
+async fn read_frames_inner(shared: &Shared, index: usize, endpoint: &str) -> Result<()> {
+    let stub = connect(endpoint).await?;
+    let mut ctx = rpc::ClientRequestContext::default();
+    ctx.http.wait_for_ready = true;
+    let mut res_stream = stub.ReadFrames(&ctx, &ReadFramesRequest::default()).await;
+    while let Some(res) = res_stream.recv().await {
+        let now = Instant::now();
+        let _ = std::fs::write(format!("/dev/shm/rift_preview_{}.jpg", index + 1), res.mjpeg());
+        let mut p = shared.previews[index].lock().unwrap();
+        p.count += 1;
+        p.bytes += res.mjpeg().len() as u64;
+        p.first.get_or_insert(now);
+        p.last = Some(now);
+    }
     res_stream.finish().await?;
     Ok(())
 }
@@ -534,6 +572,7 @@ async fn main() -> Result<()> {
     let mut seconds: u64 = 60;
     let mut blink: Option<String> = None;
     let mut blink_every: f64 = 3.0;
+    let mut frames = false;
     let mut endpoints: Vec<String> = vec![];
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -541,6 +580,8 @@ async fn main() -> Result<()> {
             seconds = v.parse()?;
         } else if arg == "--seconds" {
             seconds = args.next().ok_or_else(|| err_msg("--seconds needs a value"))?.parse()?;
+        } else if arg == "--frames" {
+            frames = true;
         } else if arg == "--blink" {
             blink = Some("blink 0".into());
         } else if let Some(v) = arg.strip_prefix("--blink=") {
@@ -574,7 +615,8 @@ async fn main() -> Result<()> {
     }
 
     let shared = Arc::new(Shared { nodes: (0..n).map(|_| Mutex::new(NodeLog::default())).collect(),
-                                   blinks: Mutex::new(vec![]) });
+                                   blinks: Mutex::new(vec![]),
+                                   previews: (0..n).map(|_| Mutex::new(PreviewLog::default())).collect() });
 
     println!("rift_check: {} nodes ({}), {} s{}", n, endpoints.join(", "), seconds,
              blink_setup.as_ref().map(|(c, lead, _, port)| format!(", --blink {:?} ({} frames ahead) every {} s on {}",
@@ -583,6 +625,9 @@ async fn main() -> Result<()> {
     let start = Instant::now();
     let _tasks: Vec<_> = endpoints.iter().enumerate()
         .map(|(i, e)| executor::spawn(read_blobs(shared.clone(), i, e.clone())))
+        .collect();
+    let _frame_tasks: Vec<_> = endpoints.iter().enumerate().filter(|_| frames)
+        .map(|(i, e)| executor::spawn(read_frames(shared.clone(), i, e.clone())))
         .collect();
 
     let end = start + Duration::from_secs(seconds);
@@ -663,6 +708,19 @@ async fn main() -> Result<()> {
     println!("Blobs by node:");
     for (i, b) in blobs.iter().enumerate() {
         println!("  node {} {}: {}", i + 1, endpoints[i], blob_line(b));
+    }
+
+    if frames {
+        println!();
+        println!("Previews by node (ReadFrames):");
+        for (i, p) in shared.previews.iter().enumerate() {
+            let p = p.lock().unwrap();
+            let span = match (p.first, p.last) { (Some(a), Some(b)) => (b - a).as_secs_f64(), _ => 0.0 };
+            println!("  node {} {}: {} JPEGs ({:.2} fps), mean {:.0} KB{}", i + 1, endpoints[i], p.count,
+                     if p.count > 1 { (p.count - 1) as f64 / span } else { 0.0 },
+                     p.bytes as f64 / p.count.max(1) as f64 / 1e3,
+                     p.error.as_ref().map(|e| format!("; stream ended: {}", e)).unwrap_or_default());
+        }
     }
 
     let Some(first) = first_response(&logs) else {

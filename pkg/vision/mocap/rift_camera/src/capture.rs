@@ -4,7 +4,8 @@
 //! STREAMON, run the sync setup, then dequeue frames for as long as the camera
 //! stays plugged in; when it goes away, wait for it and start again.
 //!
-//! The frame loop is the hot path, so it never copies, allocates or prints:
+//! The frame loop is the hot path, so it never allocates or prints, and copies
+//! a frame only for a preview (preview.rs, at mjpeg.max_fps while watched):
 //! each frame is read in place from its mmap'd buffer and the buffer goes back
 //! to the driver straight after. Counts are plain integers, reported every
 //! REPORT_INTERVAL.
@@ -21,6 +22,7 @@ use crate::bridge::Bridge;
 use crate::config::*;
 use crate::detect::{BlobSettings, Detector};
 use crate::hotpix::HotPixels;
+use crate::preview::Previews;
 use crate::service::RiftCameraService;
 use rift_camera::lens::FisheyeCalibration;
 use crate::slots::{monotonic_ns, Slot, Slotter};
@@ -136,7 +138,7 @@ fn hw_timestamps_on() -> bool {
 
 pub async fn run(config: RiftCameraConfig, options: CaptureOptions, counters: Arc<CaptureCounters>,
                  blobs: Arc<BroadcastChannel<ReadBlobsResponse>>, settings: Arc<BlobSettings>,
-                 camera: Arc<RiftCameraService>) -> Result<()> {
+                 camera: Arc<RiftCameraService>, mut previews: Previews) -> Result<()> {
     if !hw_timestamps_on() {
         eprintln!("warning: uvcvideo hwtimestamps is off; frame intervals will step by about 4 ms \
                    (echo 1 | sudo tee /sys/module/uvcvideo/parameters/hwtimestamps)");
@@ -164,7 +166,8 @@ pub async fn run(config: RiftCameraConfig, options: CaptureOptions, counters: Ar
         }
 
         slotter.restart();
-        match stream(&config, &options, &counters, &blobs, &settings, &camera, &mut slotter, &mut detector).await {
+        match stream(&config, &options, &counters, &blobs, &settings, &camera, &mut slotter, &mut detector,
+                     &mut previews).await {
             Ok(()) => {}
             Err(e) => eprintln!("{}: {}", config.serial, e),
         }
@@ -176,7 +179,7 @@ pub async fn run(config: RiftCameraConfig, options: CaptureOptions, counters: Ar
 /// One stretch of streaming, until the camera goes away or stalls.
 async fn stream(config: &RiftCameraConfig, options: &CaptureOptions, counters: &CaptureCounters,
                 blobs: &BroadcastChannel<ReadBlobsResponse>, settings: &BlobSettings, camera: &RiftCameraService,
-                slotter: &mut Slotter, detector: &mut Detector) -> Result<()> {
+                slotter: &mut Slotter, detector: &mut Detector, previews: &mut Previews) -> Result<()> {
     let path = config.device_path();
     let frame_bytes = (FRAME_WIDTH * FRAME_HEIGHT) as usize;
 
@@ -317,6 +320,11 @@ async fn stream(config: &RiftCameraConfig, options: &CaptureOptions, counters: &
                         detector.published(monotonic_ns() - dq_ns);
                     }
                 }
+            }
+            // Then a preview copy, at mjpeg.max_fps while ReadFrames has
+            // subscribers (one compare otherwise).
+            if full {
+                previews.offer(dq_ns, &buffer.used_memory()[..frame_bytes]);
             }
         }
 

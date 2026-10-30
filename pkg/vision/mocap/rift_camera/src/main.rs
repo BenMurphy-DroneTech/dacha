@@ -22,6 +22,7 @@ mod config;
 mod detect;
 mod hotpix;
 mod mdns;
+mod preview;
 mod service;
 mod slots;
 
@@ -94,9 +95,16 @@ async fn main() -> Result<()> {
     protobuf::text::parse_text_proto(detect::RIFT_BLOB_FILTER, &mut filter)?;
     let settings = Arc::new(detect::BlobSettings::new(threshold, filter.clone()));
 
+    // Dennis's preview defaults (5 fps, quality 100, full size) until the manager configures them.
+    let mjpeg = mocap_camera_core::MJPEGEncoder::default_config()?;
+    let preview_settings = preview::PreviewSettings::new(threshold, mjpeg.clone());
+    let frames = Arc::new(BroadcastChannel::default());
+    let previews = preview::Previews::start(frames.clone(), preview_settings.clone())?;
+
     let blobs = Arc::new(BroadcastChannel::default());
     let camera = Arc::new(service::RiftCameraService::new(&config, args.period_us, args.exposure_us as f64,
-                                                          blobs.clone(), settings.clone(), threshold, filter));
+                                                          blobs.clone(), settings.clone(), threshold, filter,
+                                                          frames, preview_settings, mjpeg));
     server.add_service(camera.clone().into_service())?;
 
     let time_sync = Arc::new(ptp_core::DummyTimeSyncNode::create());
@@ -110,7 +118,7 @@ async fn main() -> Result<()> {
         hot_pixels: format!("{}/hot_pixels_{}.txt", args.hot_pixels_dir, config.serial),
     };
     let _capture = executor::spawn(capture::run(config.clone(), options, counters.clone(), blobs, settings,
-                                                camera.clone()));
+                                                camera.clone(), previews));
 
     service.register_dependency(server.start()).await;
 

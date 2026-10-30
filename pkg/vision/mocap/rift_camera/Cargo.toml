@@ -1,0 +1,27 @@
+[package]
+name = "rift_camera"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "rift_camera"
+path = "src/main.rs"
+
+[dependencies]
+common = { path = "../../../common" }
+sys = { path = "../../../sys" }
+file = { path = "../../../file" }
+executor = { path = "../../../executor" }
+executor_multitask = { path = "../../../executor/multitask" }
+macros = { path = "../../../macros" }
+crypto = { path = "../../../crypto" }
+base_radix = { path = "../../../base/radix" }
+protobuf = { path = "../../../protobuf" }
+rpc = { path = "../../../rpc" }
+http = { path = "../../../http" }
+net = { path = "../../../net" }
+ptp_core = { path = "../../../net/ptp/core" }
+ptp_proto = { path = "../../../net/ptp/proto" }
+v4l2 = { path = "../../../media/v4l2" }
+mocap_proto = { path = "../proto" }
+libc = "0.2"

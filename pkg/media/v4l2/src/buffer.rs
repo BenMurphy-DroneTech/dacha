@@ -106,6 +106,11 @@ impl MMAPBuffer {
         self.raw.buffer.sequence
     }
 
+    /// The buffer's V4L2_BUF_FLAG_* flags.
+    pub fn flags(&self) -> u32 {
+        self.raw.buffer.flags
+    }
+
     /// Monotonic timestamp at which which the frame was recorded.
     /// This uses the same clock as clock_gettime(CLOCK_MONOTONIC).
     pub fn monotonic_timestamp(&self) -> Option<Duration> {

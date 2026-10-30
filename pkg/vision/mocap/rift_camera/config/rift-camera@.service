@@ -1,0 +1,28 @@
+# One Rift CV1 camera node: rift-camera@<serial>.service.
+#
+# Install on the Pi (from ~/dacha, after building rift_camera):
+#   sudo cp pkg/vision/mocap/rift_camera/config/rift-camera@.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now rift-camera@WMTD305350189Q   (one per camera)
+# Logs: journalctl -u 'rift-camera@*' -f
+
+[Unit]
+Description=Rift CV1 camera %i for dacha mocap
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ben
+WorkingDirectory=/home/ben/dacha
+# uvcvideo's hardware timestamps time each frame by the sensor's start of
+# frame; the parameter resets at boot.
+ExecStartPre=+/bin/sh -c 'echo 1 > /sys/module/uvcvideo/parameters/hwtimestamps'
+ExecStart=/home/ben/dacha/target/release/rift_camera --config=pkg/vision/mocap/rift_camera/config/pi1.cfg --serial=%i
+# Port 82 is below 1024.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+Nice=-10
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

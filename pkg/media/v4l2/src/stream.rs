@@ -293,6 +293,17 @@ impl<B: Buffer> Stream<B> {
     /// TODO: Require '&mut self' for this (TODO: Instead allow splitting
     /// streams in half)
     pub async fn dequeue_buffer(&self) -> Result<B> {
+        self.dequeue_buffer_impl(false).await
+    }
+
+    /// Like dequeue_buffer, but a buffer the driver flagged with
+    /// V4L2_BUF_FLAG_ERROR comes back (check its flags()) instead of an error,
+    /// so the caller can enqueue it again rather than lose it.
+    pub async fn dequeue_buffer_with_errors(&self) -> Result<B> {
+        self.dequeue_buffer_impl(true).await
+    }
+
+    async fn dequeue_buffer_impl(&self, allow_errors: bool) -> Result<B> {
         // NOTE: This must be pinned as we make a reference to it below.
         let mut planes = vec![];
         planes.reserve_exact(self.num_planes);
@@ -332,7 +343,7 @@ impl<B: Buffer> Stream<B> {
 
         // TODO: Only consider this if we care about reading the contents of the buffer
         // (or feeding it as an input to a stream that will read from it).
-        if raw.buffer.flags & V4L2_BUF_FLAG_ERROR != 0 {
+        if !allow_errors && raw.buffer.flags & V4L2_BUF_FLAG_ERROR != 0 {
             return Err(err_msg("V4L2 buffer returned with corrupted data"));
         }
 

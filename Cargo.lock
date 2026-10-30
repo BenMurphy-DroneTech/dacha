@@ -3120,6 +3120,7 @@ dependencies = [
  "mocap_camera_core",
  "mocap_proto",
  "net",
+ "net_iface",
  "parsing",
  "peripherals",
  "pio_rp1",
@@ -4468,6 +4469,29 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.105",
+]
+
+[[package]]
+name = "rift_camera"
+version = "0.1.0"
+dependencies = [
+ "base_radix",
+ "common",
+ "crypto",
+ "executor",
+ "executor_multitask",
+ "file",
+ "http",
+ "libc",
+ "macros",
+ "mocap_proto",
+ "net",
+ "protobuf",
+ "ptp_core",
+ "ptp_proto",
+ "rpc",
+ "sys",
+ "v4l2",
 ]
 
 [[package]]

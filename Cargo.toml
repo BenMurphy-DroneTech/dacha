@@ -235,6 +235,7 @@ members = [
 	"pkg/vision/mocap/app",
 	"pkg/vision/mocap/tools",
 	"pkg/vision/mocap/simulation",
+	"pkg/vision/mocap/rift_camera",
 ]
 
 [workspace.dependencies]

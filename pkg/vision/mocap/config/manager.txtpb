@@ -19,8 +19,10 @@ initial_camera_config {
         # Small blobs always cover more pixels than pi * a * b (their faint
         # rim counts in the area but hardly in the weighted radii): 2.6 px
         # markers (20 mm at 5.5 m) reach -1.48, so 0.25 rejected them all.
-        # rift_camera's rift_blob_sim: 1.5 accepts 100% from 2.6 to 60 px.
-        elliptical_area_error: 1.5
+        # rift_camera's rift_blob_sim: 1.5 accepts 100% from 2.6 to 60 px;
+        # a real diffused LED reaches -1.68, hence 3.0 (rejects only blobs
+        # covering over 4x their ellipse).
+        elliptical_area_error: 3.0
         max_radius_ratio: 1.5
         max_centroid_bbox_skew {
             abs: 1

@@ -30,17 +30,21 @@ use crate::slots::monotonic_ns;
 /// from rift_blob_sim running synthetic markers through Dennis's
 /// FrameProcessor: only elliptical_area_error moves from dacha's 0.25 (which
 /// rejects every blob under about 5 px; small blobs always cover more pixels
-/// than pi * a * b) to 1.5, and the skew limit tightens to 1 px. 100% of
-/// 2.6-60 px blobs pass at 1.5x-5x full scale; noise, hot pixels and pixel
-/// pairs don't (min_area 6 also keeps out the diagonal pairs whose radius_b
-/// comes out NaN). The manager's config (config/manager.txtpb) matches.
+/// than pi * a * b) and the skew limit tightens to 1 px. The simulation
+/// passed 100% of 2.6-60 px blobs at 1.5 (worst -1.48), but a real diffused
+/// LED's saturated core and wide faint halo reach -1.52 to -1.68, so 3.0:
+/// at 1 or more the check only rejects blobs covering over (1 + limit) times
+/// their ellipse, and aspect, radius ratio and skew still catch merged or odd
+/// shapes. Noise, hot pixels and pixel pairs don't pass (min_area 6 also keeps
+/// out the diagonal pairs whose radius_b comes out NaN). The manager's config
+/// (config/manager.txtpb) matches.
 pub const RIFT_THRESHOLD: u32 = 30;
 pub const RIFT_BLOB_FILTER: &str = r#"
     min_area: 6
     max_area: 10000
     reject_edge: true
     max_bbox_aspect_ratio: 1.5
-    elliptical_area_error: 1.5
+    elliptical_area_error: 3.0
     max_radius_ratio: 1.5
     max_centroid_bbox_skew { abs: 1  rel: 0.05 }
 "#;

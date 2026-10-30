@@ -1,6 +1,6 @@
 mod inst;
 mod tree;
-mod solver;
+pub mod solver;
 mod model;
 mod tracker;
 

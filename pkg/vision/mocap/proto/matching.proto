@@ -67,6 +67,16 @@ message BlobMatchingConfig {
 
     // In m/s
     double max_marker_speed = 11;
+
+    // Threads for the epipolar search for new points (0 or 1: none). The
+    // results are the same on any number; threads only pay when many blobs
+    // are left after the old points are rematched (a skeleton being found
+    // again, or markers moving faster than the predictor follows).
+    uint32 search_threads = 12;
+
+    // Blobs left unclaimed after rematching below which the search stays on
+    // one thread (0: 40).
+    uint32 parallel_min_blobs = 13;
 }
 
 message TrackedPointProto {

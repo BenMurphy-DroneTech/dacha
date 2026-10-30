@@ -72,6 +72,11 @@ matching {
     min_old_point_matching_ratio: 1.5
 
     fast_rematch_old_points: true
+
+    # rift_solve_bench: matching the same on any number of threads; with 4,
+    # a re-found skeleton's frame takes 1.6 ms instead of 3.1 and very fast
+    # markers a median 0.66 ms instead of 1.05.
+    search_threads: 4
 }
 
 wand {

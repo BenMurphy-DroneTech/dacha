@@ -260,60 +260,44 @@ impl BlobMatcher {
 
         self.propagate_old_points(results, &mut proposals);
 
-        let mut epipolar_matches = vec![];
-
-        for cam1_idx in 0..self.camera_params.len() {
-            for pt1_idx in 0..self.current_2d_points[cam1_idx].len() {
-                let pt1 = &self.current_2d_points[cam1_idx][pt1_idx];
-                if pt1.claimed {
-                    continue;
-                }
-
-                for cam2_idx in (cam1_idx + 1)..self.camera_params.len() {
-
-                    self.find_epipolar_line_match(cam1_idx, pt1_idx, cam2_idx, &mut epipolar_matches);
-
-                    for (_, pt2_idx) in epipolar_matches.iter().cloned() {
-                        let mut track = vec![];
-                        let mut track_good = false;
-                        track.push((cam1_idx, pt1_idx));
-                        track.push((cam2_idx, pt2_idx));
-
-                        let (pt, _) = match self.triangulate_track(&track) {
-                            Some(v) => v,
-                            None => continue
-                        };
-
-                        for cam_n_idx in 0..self.camera_params.len() {
-                            if cam_n_idx == cam1_idx || cam_n_idx == cam2_idx {
-                                continue;
-                            }
-
-                            if let Some(idx) = self.find_point_match(&pt, cam_n_idx) {
-                                track.push((cam_n_idx, idx));
-                            }
-                        }
-
-                        if track.len() >= (self.config.min_num_matches() as usize) {
-                            // TODO: Maybe re-triangulate if we got more points and calculate error/confidence.
-                            let score = (track.len() as f64 * 100.0);
-                            proposals.push(TrackedPointProposal {
-                                observations: track,
-                                position: pt,
-                                score,
-                            });
-                        }
+        // New points from epipolar matches, camera by camera. The search only
+        // reads, so with many unclaimed blobs it runs on threads, each taking
+        // every T-th camera; the proposals are joined in camera order, as one
+        // thread would make them.
+        let n_cams = self.camera_params.len();
+        let unclaimed: usize = self.current_2d_points.iter()
+            .map(|v| v.iter().filter(|p| !p.claimed).count()).sum();
+        let threads = (self.config.search_threads() as usize).min(n_cams.max(1));
+        let min_blobs = match self.config.parallel_min_blobs() { 0 => 40, v => v as usize };
+        if threads <= 1 || unclaimed < min_blobs {
+            let mut epipolar_matches = vec![];
+            for cam1_idx in 0..n_cams {
+                self.proposals_from_camera(cam1_idx, &mut epipolar_matches, &mut proposals);
+            }
+        } else {
+            let this = &*self;
+            let mut per_cam: Vec<Vec<TrackedPointProposal>> = (0..n_cams).map(|_| vec![]).collect();
+            std::thread::scope(|s| {
+                let handles: Vec<_> = (0..threads).map(|t| s.spawn(move || {
+                    let mut out = vec![];
+                    let mut epipolar_matches = vec![];
+                    let mut cam = t;
+                    while cam < n_cams {
+                        let mut v = vec![];
+                        this.proposals_from_camera(cam, &mut epipolar_matches, &mut v);
+                        out.push((cam, v));
+                        cam += threads;
                     }
-
-                    // if track_good {
-                    //     break;
-                    // }
+                    out
+                })).collect();
+                for h in handles {
+                    for (cam, v) in h.join().unwrap() {
+                        per_cam[cam] = v;
+                    }
                 }
-
-                // if track_good {
-                //     self.finalize_track(&track, &track_guess);
-                //     track_good = false;
-                // }
+            });
+            for v in per_cam {
+                proposals.extend(v);
             }
         }
 
@@ -373,6 +357,68 @@ impl BlobMatcher {
         }
 
         self.points()
+    }
+
+    /// The proposals for unclaimed blobs of camera cam1_idx matched along the
+    /// epipolar lines in every later camera.
+    fn proposals_from_camera(
+        &self,
+        cam1_idx: usize,
+        epipolar_matches: &mut Vec<(f64, usize)>,
+        proposals: &mut Vec<TrackedPointProposal>
+    ) {
+        for pt1_idx in 0..self.current_2d_points[cam1_idx].len() {
+            let pt1 = &self.current_2d_points[cam1_idx][pt1_idx];
+            if pt1.claimed {
+                continue;
+            }
+
+            for cam2_idx in (cam1_idx + 1)..self.camera_params.len() {
+
+                self.find_epipolar_line_match(cam1_idx, pt1_idx, cam2_idx, epipolar_matches);
+
+                for (_, pt2_idx) in epipolar_matches.iter().cloned() {
+                    let mut track = vec![];
+                    let mut track_good = false;
+                    track.push((cam1_idx, pt1_idx));
+                    track.push((cam2_idx, pt2_idx));
+
+                    let (pt, _) = match self.triangulate_track(&track) {
+                        Some(v) => v,
+                        None => continue
+                    };
+
+                    for cam_n_idx in 0..self.camera_params.len() {
+                        if cam_n_idx == cam1_idx || cam_n_idx == cam2_idx {
+                            continue;
+                        }
+
+                        if let Some(idx) = self.find_point_match(&pt, cam_n_idx) {
+                            track.push((cam_n_idx, idx));
+                        }
+                    }
+
+                    if track.len() >= (self.config.min_num_matches() as usize) {
+                        // TODO: Maybe re-triangulate if we got more points and calculate error/confidence.
+                        let score = (track.len() as f64 * 100.0);
+                        proposals.push(TrackedPointProposal {
+                            observations: track,
+                            position: pt,
+                            score,
+                        });
+                    }
+                }
+
+                // if track_good {
+                //     break;
+                // }
+            }
+
+            // if track_good {
+            //     self.finalize_track(&track, &track_guess);
+            //     track_good = false;
+            // }
+        }
     }
 
     pub fn points(&self) -> Vec<TrackedPoint> {
@@ -843,6 +889,7 @@ fn to_3d(v: &Vector2d) -> Vector3d {
 fn squared(v: f64) -> f64 {
     v * v
 }
+
 
 
 

@@ -39,7 +39,6 @@ protobuf = { path = "../../../protobuf" }
 rpc = { path = "../../../rpc" }
 http = { path = "../../../http" }
 net = { path = "../../../net" }
-ptp_core = { path = "../../../net/ptp/core" }
 ptp_proto = { path = "../../../net/ptp/proto" }
 v4l2 = { path = "../../../media/v4l2" }
 mocap_proto = { path = "../proto" }

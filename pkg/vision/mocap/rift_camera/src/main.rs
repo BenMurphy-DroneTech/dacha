@@ -7,9 +7,10 @@
 //!
 //!   rift_camera --config=pkg/vision/mocap/rift_camera/config/pi1.cfg --serial=WMTD305350189Q
 //!
-//! TimeSync is dacha's dummy node: four processes on one Pi can't all steer
-//! the Pi's PTP clock. Frames are numbered on the beacon grid instead, which
-//! rift_grid publishes in /dev/shm (see grid.rs and slots.rs).
+//! TimeSync is dacha's dummy node, reporting the beacon grid (timesync.rs):
+//! four processes on one Pi can't all steer the Pi's PTP clock. Frames are
+//! numbered on the beacon grid instead, which rift_grid publishes in /dev/shm
+//! (see grid.rs and slots.rs).
 
 #[macro_use]
 extern crate common;
@@ -25,6 +26,7 @@ mod mdns;
 mod preview;
 mod service;
 mod slots;
+mod timesync;
 
 use std::sync::Arc;
 
@@ -107,7 +109,7 @@ async fn main() -> Result<()> {
                                                           frames, preview_settings, mjpeg));
     server.add_service(camera.clone().into_service())?;
 
-    let time_sync = Arc::new(ptp_core::DummyTimeSyncNode::create());
+    let time_sync = Arc::new(timesync::RiftTimeSync::create());
     server.add_service(time_sync.clone().into_service())?;
 
     let counters = Arc::new(CaptureCounters::default());

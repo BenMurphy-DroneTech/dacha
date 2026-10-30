@@ -4489,7 +4489,6 @@ dependencies = [
  "mocap_proto",
  "net",
  "protobuf",
- "ptp_core",
  "ptp_proto",
  "rpc",
  "sys",

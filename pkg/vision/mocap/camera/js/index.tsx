@@ -187,7 +187,7 @@ class App extends React.Component<{}, AppState> {
                     <CardBody>
                         <img ref={this._mjpeg_img} src="/camera" style={{
                             maxWidth: 1000,
-                            transform: (orientation.upside_down ? 'scaleY(-1)' : 'scaleX(-1)')
+                            transform: (!orientation ? 'none' : orientation.upside_down ? 'scaleY(-1)' : 'scaleX(-1)')
                         }} />
                         <Button preset="secondary" onClick={this._save_frame}
                             style={{ display: 'block', marginTop: 10 }}
@@ -200,7 +200,7 @@ class App extends React.Component<{}, AppState> {
                 <Card header="Blob view" style={{ marginBottom: 10 }}>
                     <CardBody>
                         <div style={{ maxWidth: 1000 }}>
-                            <Blob2dViewer status={status} results={this.state.blobs} upsideDown={orientation.upside_down} />
+                            <Blob2dViewer status={status} results={this.state.blobs} upsideDown={orientation ? orientation.upside_down : false} />
                         </div>
 
                     </CardBody>

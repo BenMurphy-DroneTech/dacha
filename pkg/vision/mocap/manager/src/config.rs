@@ -170,6 +170,9 @@ impl ManagerConfigContainer {
         if diff.has_enabled() {
             base.set_enabled(diff.enabled());
         }
+        if !diff.name().is_empty() {
+            base.set_name(diff.name());
+        }
     }
 }
 

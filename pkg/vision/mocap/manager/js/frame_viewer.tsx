@@ -29,7 +29,9 @@ interface FrameViewerProps {
     flipY: boolean;
     points: Point[];
     show_crosshair?: boolean;
-    channel?: Channel
+    channel?: Channel;
+    // The camera's Status sensor (frame_width, frame_height); 1920x1200 if unset.
+    sensor?: { frame_width?: number, frame_height?: number };
 }
 
 interface ImageSource {
@@ -223,8 +225,9 @@ export class FrameViewer extends React.Component<FrameViewerProps> {
         const sy = flipY ? -1 : 1;
 
         // TODO: Make this more dynamic.
-        let frame_width = 1920;
-        let frame_height = 1200;
+        let sensor = this.props.sensor || {};
+        let frame_width = (sensor.frame_width || 1920) * 1;
+        let frame_height = (sensor.frame_height || 1200) * 1;
 
         let aspect_ratio = `${frame_width} / ${frame_height}`;
 
@@ -254,7 +257,7 @@ export class FrameViewer extends React.Component<FrameViewerProps> {
                         transformOrigin: 'center center',
                         transform: `scale(${sx}, ${sy})`,
                     }}>
-                        <svg viewBox="0 0 1920 1200" preserveAspectRatio="none" style={{
+                        <svg viewBox={`0 0 ${frame_width} ${frame_height}`} preserveAspectRatio="none" style={{
                             width: '100%', height: '100%', top: 0, left: 0, position: 'absolute',
                             pointerEvents: 'none'
                         }}>

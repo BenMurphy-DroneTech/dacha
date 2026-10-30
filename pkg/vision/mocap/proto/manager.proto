@@ -103,6 +103,9 @@ message MocapPerCameraConfig {
     vision.CameraExtrinsicsProto extrinsics = 4;
 
     optional bool enabled = 5;
+
+    // Shown on the Cameras page beside the camera's id (e.g. "C1").
+    string name = 6;
 }
 
 message AuxRpcServerConfig {

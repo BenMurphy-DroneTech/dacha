@@ -184,7 +184,9 @@ export class CamerasPage extends React.Component<CamerasPageProps, CamerasPageSt
         let angle = '';
         if (camera.camera_status) {
             let o = camera_orientation(camera.camera_status);
-            angle = <span>{o.horizon_angle}&deg;</span>;
+            if (o) {
+                angle = <span>{o.horizon_angle}&deg;</span>;
+            }
         }
 
         // Slower than gigabit links add enough latency to exceed the PTP follower's
@@ -235,6 +237,7 @@ export class CamerasPage extends React.Component<CamerasPageProps, CamerasPageSt
                     />
                 </td>
                 <td>
+                    {config.name ? <b style={{ marginRight: 6 }}>{config.name}</b> : null}
                     <a href={"https://" + entity_id_to_string(camera.id) + ".mocap_camera.worker.home.cluster.internal"}>
                         {entity_id_to_string(camera.id)}
                     </a>
@@ -398,8 +401,8 @@ export class CamerasPage extends React.Component<CamerasPageProps, CamerasPageSt
                         let flip_x = false;
                         let flip_y = false;
 
-                        if (camera.camera_status) {
-                            let o = camera_orientation(camera.camera_status);
+                        let o = camera.camera_status ? camera_orientation(camera.camera_status) : null;
+                        if (o) {
                             upside_down = o.upside_down;
                             angle = o.horizon_angle;
 
@@ -446,7 +449,7 @@ export class CamerasPage extends React.Component<CamerasPageProps, CamerasPageSt
                                     overflow: 'hidden',
                                     boxShadow: (active ? '0px 0px 10px #08f' : '')
                                 }}>
-                                    <FrameViewer image_source={image_source} points={points} flipX={flip_x} flipY={flip_y} controls_enabled={active} show_crosshair={this.state.show_crosshair} channel={this.props.context.channel} />
+                                    <FrameViewer image_source={image_source} points={points} flipX={flip_x} flipY={flip_y} sensor={camera.camera_status && camera.camera_status.sensor} controls_enabled={active} show_crosshair={this.state.show_crosshair} channel={this.props.context.channel} />
                                 </div>
                             </div>
                         );

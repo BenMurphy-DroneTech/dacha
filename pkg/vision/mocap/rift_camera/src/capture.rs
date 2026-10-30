@@ -19,6 +19,10 @@ use mocap_proto::mocap::ReadBlobsResponse;
 
 use crate::bridge::Bridge;
 use crate::config::*;
+use crate::detect::{BlobSettings, Detector};
+use crate::hotpix::HotPixels;
+use crate::service::RiftCameraService;
+use rift_camera::lens::FisheyeCalibration;
 use crate::slots::{monotonic_ns, Slot, Slotter};
 
 /// Buffers queued in the driver: 4 frames (44 ms at 90 fps) of slack.
@@ -34,6 +38,8 @@ pub struct CaptureOptions {
     pub period_us: u32,
     pub exposure_us: f64,
     pub gain: u32,
+    /// This camera's hot-pixel map (riftcv1-mocap data/captures/hot_pixels_<serial>.txt).
+    pub hot_pixels: String,
 }
 
 /// Totals since the process started, readable from other tasks.
@@ -129,7 +135,8 @@ fn hw_timestamps_on() -> bool {
 }
 
 pub async fn run(config: RiftCameraConfig, options: CaptureOptions, counters: Arc<CaptureCounters>,
-                 blobs: Arc<BroadcastChannel<ReadBlobsResponse>>) -> Result<()> {
+                 blobs: Arc<BroadcastChannel<ReadBlobsResponse>>, settings: Arc<BlobSettings>,
+                 camera: Arc<RiftCameraService>) -> Result<()> {
     if !hw_timestamps_on() {
         eprintln!("warning: uvcvideo hwtimestamps is off; frame intervals will step by about 4 ms \
                    (echo 1 | sudo tee /sys/module/uvcvideo/parameters/hwtimestamps)");
@@ -137,6 +144,15 @@ pub async fn run(config: RiftCameraConfig, options: CaptureOptions, counters: Ar
 
     let path = config.device_path();
     let mut slotter = Slotter::new(&config.serial);
+    let hot = match HotPixels::load(&options.hot_pixels) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("warning: {}; no hot-pixel repair", e);
+            HotPixels::none()
+        }
+    };
+    let mut detector = Detector::new(hot, config.row_start);
+    println!("{}: {} hot pixels in the window", config.serial, detector.hot_pixels_in_window());
     loop {
         if !std::path::Path::new(&path).exists() {
             println!("{}: waiting for {}", config.serial, path);
@@ -148,7 +164,7 @@ pub async fn run(config: RiftCameraConfig, options: CaptureOptions, counters: Ar
         }
 
         slotter.restart();
-        match stream(&config, &options, &counters, &blobs, &mut slotter).await {
+        match stream(&config, &options, &counters, &blobs, &settings, &camera, &mut slotter, &mut detector).await {
             Ok(()) => {}
             Err(e) => eprintln!("{}: {}", config.serial, e),
         }
@@ -159,7 +175,8 @@ pub async fn run(config: RiftCameraConfig, options: CaptureOptions, counters: Ar
 
 /// One stretch of streaming, until the camera goes away or stalls.
 async fn stream(config: &RiftCameraConfig, options: &CaptureOptions, counters: &CaptureCounters,
-                blobs: &BroadcastChannel<ReadBlobsResponse>, slotter: &mut Slotter) -> Result<()> {
+                blobs: &BroadcastChannel<ReadBlobsResponse>, settings: &BlobSettings, camera: &RiftCameraService,
+                slotter: &mut Slotter, detector: &mut Detector) -> Result<()> {
     let path = config.device_path();
     let frame_bytes = (FRAME_WIDTH * FRAME_HEIGHT) as usize;
 
@@ -184,14 +201,35 @@ async fn stream(config: &RiftCameraConfig, options: &CaptureOptions, counters: &
 
     // The sync setup talks to the bridge for about half a second; frames that
     // arrive meanwhile wait in the queued buffers or are dropped by uvcvideo.
-    let setup = {
+    // Then the lens's factory calibration from the camera's flash, on the same
+    // handle (both use the SPI selectors, so never at once).
+    let (setup, calibration) = {
         let path = path.clone();
         let (exposure, gain, row_start) = (options.exposure_us, options.gain, config.row_start as u16);
         run_blocking(move || -> Result<_> {
             let mut bridge = Bridge::open(&path)?;
-            bridge.sync_setup(exposure, gain, row_start, FRAME_HEIGHT as u16)
+            let setup = bridge.sync_setup(exposure, gain, row_start, FRAME_HEIGHT as u16)?;
+            let calibration = bridge.read_calibration().and_then(|b| FisheyeCalibration::parse(&b));
+            Ok((setup, calibration))
         }).await??
     };
+    match calibration {
+        Ok(lens) => {
+            println!("{}: lens f {:.3}, centre {:.3}, {:.3}, k {:.6} {:.6} {:.6} {:.6}", config.serial,
+                     lens.f, lens.cx, lens.cy, lens.k[0], lens.k[1], lens.k[2], lens.k[3]);
+            // Blob centres follow Dennis's pixel-centre convention (+0.5), so
+            // the pinhole centre does too.
+            let mut intrinsics = lens.pinhole_intrinsics();
+            intrinsics.center_mut()[0] += 0.5;
+            intrinsics.center_mut()[1] += 0.5;
+            camera.set_factory_intrinsics(intrinsics);
+            detector.set_lens(Some(lens));
+        }
+        Err(e) => {
+            eprintln!("{}: no lens calibration ({}); blob centres stay distorted", config.serial, e);
+            detector.set_lens(None);
+        }
+    }
     println!("{}: synced: exposure {} lines = {:.1} us at {:.2} MHz, radio exposure {} us, rows {}-{}, {} warnings",
              config.serial, setup.exposure_lines, setup.exposure_us, setup.pixel_clock_mhz,
              setup.radio_exposure_us, config.row_start, config.row_start + FRAME_HEIGHT - 1, setup.warnings);
@@ -205,7 +243,7 @@ async fn stream(config: &RiftCameraConfig, options: &CaptureOptions, counters: &
     let mut next_report = started + REPORT_INTERVAL;
 
     loop {
-        let buffer = match executor::timeout(FRAME_TIMEOUT, stream.dequeue_buffer_with_errors()).await {
+        let mut buffer = match executor::timeout(FRAME_TIMEOUT, stream.dequeue_buffer_with_errors()).await {
             Ok(Ok(b)) => b,
             Ok(Err(e)) => {
                 if total.frames > 0 {
@@ -263,8 +301,24 @@ async fn stream(config: &RiftCameraConfig, options: &CaptureOptions, counters: &
         let ts_ns = buffer.monotonic_timestamp().map(|t| t.as_nanos() as u64);
         let full = buffer.used_memory().len() == frame_bytes;
 
-        // Blob detection reads buffer.used_memory() in place here (step 5),
-        // before the buffer goes back to the driver.
+        // The frame's number on the beacon grid, then Dennis's blob detection
+        // on the frame in place and straight out to the manager, all before
+        // the buffer goes back to the driver. Skipped while nobody listens,
+        // as in his node.
+        if settle == 0 {
+            if let (Some(ts), true) = (ts_ns, full) {
+                if let Slot::Publish(frame_timestamp) = slotter.place(ts as i64, dq_ns) {
+                    if blobs.active() {
+                        let results = detector.detect(&mut buffer.memory_mut()[..frame_bytes], settings);
+                        let mut res = ReadBlobsResponse::default();
+                        res.set_frame_timestamp(frame_timestamp);
+                        res.new_cameras().set_results(results);
+                        blobs.send(res);
+                        detector.published(monotonic_ns() - dq_ns);
+                    }
+                }
+            }
+        }
 
         stream.enqueue_buffer(buffer).await?;
 
@@ -275,19 +329,6 @@ async fn stream(config: &RiftCameraConfig, options: &CaptureOptions, counters: &
                 next_report = window_start + REPORT_INTERVAL;
             }
             continue;
-        }
-
-        // The frame's number on the beacon grid, then straight out to the
-        // manager (blobs land here in step 5).
-        if let (Some(ts), true) = (ts_ns, full) {
-            if let Slot::Publish(frame_timestamp) = slotter.place(ts as i64, dq_ns) {
-                if blobs.active() {
-                    let mut res = ReadBlobsResponse::default();
-                    res.set_frame_timestamp(frame_timestamp);
-                    res.new_cameras();
-                    blobs.send(res);
-                }
-            }
         }
 
         let missed = stats.record(seq, ts_ns, full);
@@ -302,7 +343,8 @@ async fn stream(config: &RiftCameraConfig, options: &CaptureOptions, counters: &
 
         let now = Instant::now();
         if now >= next_report {
-            println!("{}; {}", stats.report(&config.serial, now - window_start), slotter.report());
+            println!("{}; {}; {}", stats.report(&config.serial, now - window_start), slotter.report(), detector.report());
+            detector.check_dump_request(&config.serial);
             stats = FrameStats { last_ts_ns: stats.last_ts_ns, last_seq: stats.last_seq, ..FrameStats::new(period_ns) };
             window_start = now;
             next_report = now + REPORT_INTERVAL;

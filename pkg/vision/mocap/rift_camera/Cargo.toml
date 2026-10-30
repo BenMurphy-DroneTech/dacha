@@ -18,6 +18,14 @@ path = "src/bin/rift_grid.rs"
 name = "rift_check"
 path = "src/bin/rift_check.rs"
 
+[[bin]]
+name = "rift_lens"
+path = "src/bin/rift_lens.rs"
+
+[[bin]]
+name = "rift_blob_sim"
+path = "src/bin/rift_blob_sim.rs"
+
 [dependencies]
 common = { path = "../../../common" }
 sys = { path = "../../../sys" }
@@ -35,4 +43,6 @@ ptp_core = { path = "../../../net/ptp/core" }
 ptp_proto = { path = "../../../net/ptp/proto" }
 v4l2 = { path = "../../../media/v4l2" }
 mocap_proto = { path = "../proto" }
+mocap_camera_core = { path = "../camera/core" }
+vision_proto = { path = "../../proto" }
 libc = "0.2"

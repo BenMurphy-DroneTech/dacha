@@ -11,15 +11,19 @@ use executor_multitask::BroadcastChannel;
 use mocap_proto::mocap::*;
 
 use crate::config::*;
+use crate::detect::BlobSettings;
+use vision_proto::vision::CameraIntrinsicsModelProto;
 
 pub struct RiftCameraService {
     status: Mutex<MocapCameraStatus>,
     blobs: Arc<BroadcastChannel<ReadBlobsResponse>>,
+    settings: Arc<BlobSettings>,
 }
 
 impl RiftCameraService {
     pub fn new(config: &RiftCameraConfig, period_us: u32, exposure_us: f64,
-               blobs: Arc<BroadcastChannel<ReadBlobsResponse>>) -> Self {
+               blobs: Arc<BroadcastChannel<ReadBlobsResponse>>, settings: Arc<BlobSettings>,
+               threshold: u32, filter: BlobFilterConfig) -> Self {
         let mut status = MocapCameraStatus::default();
 
         let sensor = status.sensor_mut();
@@ -35,9 +39,18 @@ impl RiftCameraService {
         let c = status.config_mut();
         c.set_frame_rate((1_000_000 / period_us) as u32);
         c.set_exposure_micros(exposure_us as u32);
-        c.set_pixel_threshold(35u32);
+        c.set_pixel_threshold(threshold);
+        c.set_blob_filter(filter);
 
-        Self { status: Mutex::new(status), blobs }
+        Self { status: Mutex::new(status), blobs, settings }
+    }
+}
+
+impl RiftCameraService {
+    /// The camera's lens as dacha should model it (a pinhole for undistorted
+    /// blob centres); the manager copies it into its config when it has none.
+    pub fn set_factory_intrinsics(&self, intrinsics: CameraIntrinsicsModelProto) {
+        self.status.lock().unwrap().hardware_config_mut().set_factory_intrinsics(intrinsics);
     }
 }
 
@@ -62,6 +75,8 @@ impl CameraService for RiftCameraService {
         // The sensor's settings are fixed for now: report them, not the request.
         config.set_frame_rate(status.config().frame_rate());
         config.set_exposure_micros(status.config().exposure_micros());
+        // Dennis's blob detection takes the threshold and filter from here.
+        self.settings.set(config.pixel_threshold(), config.blob_filter().clone());
         status.set_config(config);
         Ok(())
     }

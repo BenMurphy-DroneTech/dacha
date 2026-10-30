@@ -4,7 +4,8 @@ camera_service: "mocap_camera.job.local.cluster.internal"
 initial_camera_config {
     frame_rate: 0
     exposure_micros: 250
-    pixel_threshold: 80
+    # Rift CV1 cameras (rift_camera): dark level 18 + 12.
+    pixel_threshold: 30
     strobe_power: 0.2
 
     leds_on: true
@@ -15,10 +16,14 @@ initial_camera_config {
         max_area: 10000 # 100 x 100
         reject_edge: true
         max_bbox_aspect_ratio: 1.5
-        elliptical_area_error: 0.25
+        # Small blobs always cover more pixels than pi * a * b (their faint
+        # rim counts in the area but hardly in the weighted radii): 2.6 px
+        # markers (20 mm at 5.5 m) reach -1.48, so 0.25 rejected them all.
+        # rift_camera's rift_blob_sim: 1.5 accepts 100% from 2.6 to 60 px.
+        elliptical_area_error: 1.5
         max_radius_ratio: 1.5
         max_centroid_bbox_skew {
-            abs: 2
+            abs: 1
             rel: 0.05
         }
     }

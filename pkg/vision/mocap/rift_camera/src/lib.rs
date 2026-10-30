@@ -4,3 +4,4 @@
 extern crate common;
 
 pub mod grid;
+pub mod lens;

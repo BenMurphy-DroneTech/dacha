@@ -19,6 +19,8 @@ extern crate macros;
 mod bridge;
 mod capture;
 mod config;
+mod detect;
+mod hotpix;
 mod mdns;
 mod service;
 mod slots;
@@ -55,6 +57,10 @@ struct Args {
     /// Analog gain: 1, 2, 4 or 8.
     #[arg(default = 2)]
     gain: u32,
+
+    /// Where the hot-pixel maps are (hot_pixels_<serial>.txt), riftcv1-mocap's data/captures.
+    #[arg(default = "/home/ben/riftcv1-mocap/data/captures")]
+    hot_pixels_dir: String,
 }
 
 #[executor_main]
@@ -82,9 +88,15 @@ async fn main() -> Result<()> {
     let mut server = rpc::Http2Server::new(Some(args.rpc_port));
     server.http_options_mut().ip = net::ip::IPAddress::V4(config.ip.octets());
 
+    // Until the manager configures them (with the same values).
+    let threshold = detect::RIFT_THRESHOLD;
+    let mut filter = mocap_proto::mocap::BlobFilterConfig::default();
+    protobuf::text::parse_text_proto(detect::RIFT_BLOB_FILTER, &mut filter)?;
+    let settings = Arc::new(detect::BlobSettings::new(threshold, filter.clone()));
+
     let blobs = Arc::new(BroadcastChannel::default());
     let camera = Arc::new(service::RiftCameraService::new(&config, args.period_us, args.exposure_us as f64,
-                                                          blobs.clone()));
+                                                          blobs.clone(), settings.clone(), threshold, filter));
     server.add_service(camera.clone().into_service())?;
 
     let time_sync = Arc::new(ptp_core::DummyTimeSyncNode::create());
@@ -95,8 +107,10 @@ async fn main() -> Result<()> {
         period_us: args.period_us,
         exposure_us: args.exposure_us as f64,
         gain: args.gain,
+        hot_pixels: format!("{}/hot_pixels_{}.txt", args.hot_pixels_dir, config.serial),
     };
-    let _capture = executor::spawn(capture::run(config.clone(), options, counters.clone(), blobs));
+    let _capture = executor::spawn(capture::run(config.clone(), options, counters.clone(), blobs, settings,
+                                                camera.clone()));
 
     service.register_dependency(server.start()).await;
 

@@ -89,7 +89,8 @@ impl ComponentData {
     }
 
     pub fn finish_pixel_row(&mut self) {
-        self.area = (self.max_x - self.min_x) as u32;
+        // A run covers min_x..=max_x, so it is max_x - min_x + 1 pixels.
+        self.area = (self.max_x - self.min_x) as u32 + 1;
 
         let y = self.min_y as u64;
         self.moment_y = self.mass * y;

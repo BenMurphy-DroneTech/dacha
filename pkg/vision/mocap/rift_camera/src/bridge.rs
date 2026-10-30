@@ -18,6 +18,7 @@ use common::errors::*;
 const XU_UNIT: u8 = 4;
 const SEL_I2C: u8 = 2;      // AR0134 registers
 const SEL_REG: u8 = 3;      // bridge registers
+const SEL_COUNTER: u8 = 10; // the bridge's command counter, tagged on flash reads
 const SEL_CONTROL: u8 = 11; // SPI control
 const SEL_DATA: u8 = 12;    // SPI data
 const UVC_SET_CUR: u8 = 0x01;
@@ -224,6 +225,67 @@ impl Bridge {
             self.ar_write(0x3006, start + rows - 1)?;
         }
         self.ar_write(0x3022, 0x0000)
+    }
+
+    // ---- the bridge's SPI flash ----
+
+    /// Reads 127 bytes of the bridge's SPI flash at addr, as OpenHMD's
+    /// rift_sensor_esp770u_flash_read: GET_CUR the counter (selector 10), SET_CUR
+    /// the SPI control (selector 11) with that count, command 0x41 0x03 0x01,
+    /// the 24-bit address and the 16-bit length (both big-endian), GET_CUR the
+    /// data (selector 12), then SET_CUR the counter back.
+    ///
+    /// Always 127 bytes: uvcvideo fixes selector 12's length at the first
+    /// length it reads, and open_links makes that 127 for the radio, so a
+    /// longer read can't pass the kernel. The control's length is what the
+    /// bridge then reports for selector 12, and every radio command sets 127
+    /// first anyway, so the radio's transfers see no change. Safe while the
+    /// stream runs, but not while another handle talks to the radio.
+    pub fn flash_read(&mut self, addr: u32) -> Result<[u8; 127]> {
+        const LEN: u16 = 127;
+        for sel in [SEL_COUNTER, SEL_CONTROL] {
+            if self.len[sel as usize] == 0 {
+                self.len[sel as usize] = self.get_len(sel)
+                    .map_err(|e| format_err!("Extension unit selector {} not available: {}", sel, e))?;
+            }
+        }
+        // The kernel's length for selector 12; a different one fails the GET_CUR
+        // with ENOBUFS (query's replug message).
+        self.len[SEL_DATA as usize] = LEN;
+
+        let count = self.get(SEL_COUNTER)?[0];
+        let mut c = [0u8; 16];
+        c[0] = count;
+        c[1] = 0x41;
+        c[2] = 0x03;
+        c[3] = 0x01;
+        c[5] = (addr >> 16) as u8;
+        c[6] = (addr >> 8) as u8;
+        c[7] = addr as u8;
+        c[8] = (LEN >> 8) as u8;
+        c[9] = LEN as u8;
+        self.set(SEL_CONTROL, &c)?;
+        let data = self.get(SEL_DATA)?;
+        self.set(SEL_COUNTER, &[count])?;
+        let mut out = [0u8; 127];
+        out.copy_from_slice(&data[..127]);
+        Ok(out)
+    }
+
+    /// The lens calibration block (128 bytes at flash 0x1d000; parse with
+    /// lens::FisheyeCalibration::parse). Two 127-byte reads, at 0x1d000 and
+    /// 0x1d001, cover it, and their 126 shared bytes must agree.
+    pub fn read_calibration(&mut self) -> Result<[u8; 128]> {
+        const ADDR: u32 = 0x1d000;
+        let a = self.flash_read(ADDR)?;
+        let b = self.flash_read(ADDR + 1)?;
+        if a[1..] != b[..126] {
+            return Err(format_err!("The two flash reads of the lens calibration disagree"));
+        }
+        let mut out = [0u8; 128];
+        out[..127].copy_from_slice(&a);
+        out[127] = b[126];
+        Ok(out)
     }
 
     // ---- the nRF51 radio, over the bridge's SPI link ----

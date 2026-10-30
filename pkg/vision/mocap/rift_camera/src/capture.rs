@@ -201,11 +201,15 @@ async fn stream(config: &RiftCameraConfig, options: &CaptureOptions, counters: &
         let buffer = match executor::timeout(FRAME_TIMEOUT, stream.dequeue_buffer_with_errors()).await {
             Ok(Ok(b)) => b,
             Ok(Err(e)) => {
-                println!("{}", total.report(&config.serial, started.elapsed()));
+                if total.frames > 0 {
+                    println!("stream total: {}", total.report(&config.serial, started.elapsed()));
+                }
                 return Err(format_err!("Stream ended: {}", e));
             }
             Err(_) => {
-                println!("{}", total.report(&config.serial, started.elapsed()));
+                if total.frames > 0 {
+                    println!("stream total: {}", total.report(&config.serial, started.elapsed()));
+                }
                 return Err(format_err!("No frame for {:?}", FRAME_TIMEOUT));
             }
         };

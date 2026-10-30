@@ -4484,6 +4484,7 @@ dependencies = [
  "http",
  "libc",
  "macros",
+ "mocap_camera_core",
  "mocap_proto",
  "net",
  "protobuf",
@@ -4492,6 +4493,7 @@ dependencies = [
  "rpc",
  "sys",
  "v4l2",
+ "vision_proto",
 ]
 
 [[package]]

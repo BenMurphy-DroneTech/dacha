@@ -38,6 +38,13 @@ initial_camera_config {
     }
 }
 
+# Rift CV1 cameras on Pi 1 (rift_camera; ids from the SHA-256 of the serial),
+# named in sorted serial order until the cameras are mounted.
+per_camera { camera_id_str: "f8m1js0ghepxk"  name: "C1"  enabled: true }  # WMTD305350189Q, 169.254.10.1
+per_camera { camera_id_str: "bncjqw1wt4qjh"  name: "C2"  enabled: true }  # WMTD3062200XGN, 169.254.10.2
+per_camera { camera_id_str: "n1htkyampn4b5"  name: "C3"  enabled: true }  # WMTD3079700ZW1, 169.254.10.3
+per_camera { camera_id_str: "kz05rnewgy1fe"  name: "C4"  enabled: true }  # WMTD307A200J7A, 169.254.10.4
+
 sphere_projection_filter {
     min_angle_check_radius_ratio: 1.2
     max_angle_error_degrees: 10

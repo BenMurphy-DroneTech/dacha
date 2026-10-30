@@ -32,7 +32,9 @@ initial_camera_config {
 
     # TODO: Dedup.
     mjpeg {
-        quality: 100
+        # 90, not 100: half the encode time and a third of the JPEG, so
+        # previews barely touch the blob path on a Rift node.
+        quality: 90
         downsampling: 1
         max_fps: 5
     }

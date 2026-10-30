@@ -143,9 +143,13 @@ impl http::ServerHandler for AppHttpHandler {
 
 
         // tODO: Check for errors.
-        let child = executor::child_task::ChildTask::spawn(Self::send_frames(socket.clone(), self.side_channel.clone()));
+        // This connection's own frames: a page's side_channel_ids are tagged
+        // with its socket number (AppRpcServer) so frames come back here.
+        let frames = self.side_channel.register()?;
+        let socket_id = frames.socket();
+        let child = executor::child_task::ChildTask::spawn(Self::send_frames(socket.clone(), frames));
 
-        let rpc_server = AppRpcServer::new(self.service.clone(), socket.clone());
+        let rpc_server = AppRpcServer::new(self.service.clone(), socket.clone(), socket_id);
 
         while let Ok(msg) = on_message_receiver.recv().await {
             if let Err(e) = rpc_server.handle_message(std::str::from_utf8(&msg)?) {
@@ -161,10 +165,10 @@ impl http::ServerHandler for AppHttpHandler {
 // TODO: it seems like if this is missing, the HTTP2 connection stalls (need to boost the HTTP2 connection window size to allow individual bulky strams)
 impl AppHttpHandler {
 
-    async fn send_frames(socket: Arc<WebSocket>, side_channel: Arc<DataSideChannel>) -> Result<()> {
+    async fn send_frames(socket: Arc<WebSocket>, frames: DataSideReceiver) -> Result<()> {
 
         loop {
-            let (stream_id, data) = side_channel.recv().await?;
+            let (stream_id, data) = frames.recv().await?;
 
             let mut packet = vec![];
             packet.extend_from_slice(&stream_id.to_le_bytes());

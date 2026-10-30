@@ -289,7 +289,7 @@ export class CheckerboardPage extends React.Component<CheckerboardPageProps, Che
         }
 
         return (
-            <FrameViewer image_source={image_source} points={points} flipX={flip_x} flipY={flip_y} sensor={camera.camera_status && camera.camera_status.sensor} channel={this.props.context.channel} />
+            <FrameViewer image_source={image_source} points={points} flipX={flip_x} flipY={flip_y} sensor={(this.state.status.groups || [{}])[0].sensor} channel={this.props.context.channel} />
         );
     }
 

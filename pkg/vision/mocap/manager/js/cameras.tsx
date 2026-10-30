@@ -449,7 +449,7 @@ export class CamerasPage extends React.Component<CamerasPageProps, CamerasPageSt
                                     overflow: 'hidden',
                                     boxShadow: (active ? '0px 0px 10px #08f' : '')
                                 }}>
-                                    <FrameViewer image_source={image_source} points={points} flipX={flip_x} flipY={flip_y} sensor={camera.camera_status && camera.camera_status.sensor} controls_enabled={active} show_crosshair={this.state.show_crosshair} channel={this.props.context.channel} />
+                                    <FrameViewer image_source={image_source} points={points} flipX={flip_x} flipY={flip_y} sensor={(status.groups || [{}])[0].sensor} controls_enabled={active} show_crosshair={this.state.show_crosshair} channel={this.props.context.channel} />
                                 </div>
                             </div>
                         );

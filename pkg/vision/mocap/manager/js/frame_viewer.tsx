@@ -30,7 +30,8 @@ interface FrameViewerProps {
     points: Point[];
     show_crosshair?: boolean;
     channel?: Channel;
-    // The camera's Status sensor (frame_width, frame_height); 1920x1200 if unset.
+    // The cameras' sensor from the manager's Status (groups[0].sensor:
+    // frame_width, frame_height); 1920x1200 if unset.
     sensor?: { frame_width?: number, frame_height?: number };
 }
 

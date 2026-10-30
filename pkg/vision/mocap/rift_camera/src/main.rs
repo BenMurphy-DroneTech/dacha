@@ -90,6 +90,11 @@ async fn main() -> Result<()> {
 
     let mut server = rpc::Http2Server::new(Some(args.rpc_port));
     server.http_options_mut().ip = net::ip::IPAddress::V4(config.ip.octets());
+    // The manager's streams never end on their own, so a graceful shutdown
+    // only ever waits out its timeout (5 s by default) before a stop or restart.
+    let stop_wait = std::time::Duration::from_millis(200);
+    server.http_options_mut().graceful_shutdown_timeout = stop_wait;
+    server.http_options_mut().connection_options_v2.graceful_shutdown_timeout = stop_wait;
 
     // Until the manager configures them (with the same values).
     let threshold = detect::RIFT_THRESHOLD;

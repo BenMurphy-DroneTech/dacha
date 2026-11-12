@@ -80,18 +80,26 @@ matching {
 }
 
 wand {
-    left_arm_length: 0.25
-    right_arm_length: 0.125
-    bottom_length: 0.2
-    height: 0.0595
+    # Breadboard wand: Dennis's T (0.25 / 0.125 / 0.2) at 85% along the
+    # diagonal of a 25 mm grid plate: 6, 3 and 4 steps of 35.355 mm.
+    left_arm_length: 0.21213
+    right_arm_length: 0.10607
+    bottom_length: 0.14142
+    # Placeholder, about right: the plate has no feet yet. Only Set Origin
+    # uses it (the floor's level); measure floor to sphere centres.
+    height: 0.060
 
-    min_blob_center_pixel_distance: 20.0
+    # The Rift's lens is about 710 px to Dennis's 1450, and the wand is 85%
+    # of his, so the same sighting spans 0.42x the pixels. At 20 px the
+    # 106 mm arm passed only within 3.8 m face on (2.7 m at 45 degrees) and
+    # the handle within 5.0 m (3.5 m); at 10 px, 7.5 m (5.3 m) and 10 m.
+    min_blob_center_pixel_distance: 10.0
     max_blob_center_pixel_distance: 500.0
     max_radius_ratio: 2.0
     max_projection_stretch: 1.5
     max_reprojection_error: 5.0
     collinear_pixel_threshold: 3.0
-    min_bottom_line_pixel_distance: 20.0
+    min_bottom_line_pixel_distance: 10.0
 }
 
 checkerboard {

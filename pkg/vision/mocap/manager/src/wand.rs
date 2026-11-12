@@ -2,7 +2,7 @@ use mocap_proto::mocap::*;
 use math::matrix::{Vector3d, Vector2d, vec2d, vec3d, Matrix3d};
 use math::geometry::line::Line2;
 use vision::*;
-use math::matrix::axis_angle::to_axis_angle;
+use math::matrix::axis_angle::{from_axis_angle, to_axis_angle};
 use math::matrix::cwise_binary_ops::CwiseMulAssign;
 
 /// Match found between a set of 2d blobs in a frame and a pre-defined
@@ -304,12 +304,31 @@ impl<'a> BlobPatternFinder<'a> {
             translation: initial_translation.clone()
         });
 
-        let solution = solver.solve();
+        let mut solution = solver.solve();
 
         // println!("Solution: {:#?}", solution);
 
-        if solution.error.is_nan() ||
-           solution.error > self.config.max_reprojection_error() {
+        if solution.error.is_nan() {
+            return None;
+        }
+
+        // A flat pattern has a second pose that fits almost as well: the
+        // same view with the plane tilted the other way (see
+        // mirrored_planar_pose). The guess above lies between the two, so
+        // the solve can settle on either. Also solve from the mirror of its
+        // answer and keep the better fit.
+        //
+        // The wrong one is off by about 2.8 px at 1.5 m and 1 px at 2.5 m
+        // for a 0.32 m wand tilted 40 degrees on a 710 px lens, falling with
+        // distance and growing with the lens and the square of the wand's
+        // size.
+        solver.set_initial_extrinsics(&mirrored_planar_pose(&solution.rotation, &solution.translation));
+        let mirrored = solver.solve();
+        if mirrored.error < solution.error {
+            solution = mirrored;
+        }
+
+        if solution.error > self.config.max_reprojection_error() {
             return None;
         }
 
@@ -329,6 +348,36 @@ impl<'a> BlobPatternFinder<'a> {
 }
 
 
+/// The other pose of a flat pattern (all points at z = 0) that gives nearly
+/// the same picture: seen along the line of sight to its origin, the plane's
+/// tilt towards the camera is reversed. In a frame whose z is that line of
+/// sight this is S * R * S with S = diag(1, 1, -1).
+fn mirrored_planar_pose(rotation: &Vector3d, translation: &Vector3d) -> CameraExtrinsics {
+    let r = from_axis_angle(rotation);
+
+    // Rotation taking the line of sight onto +z.
+    let to_sight = {
+        let sight = translation.clone().normalized();
+        let z = vec3d(0., 0., 1.);
+        let axis = sight.cross(&z);
+        if axis.norm() < 1e-9 {
+            Matrix3d::identity()
+        } else {
+            from_axis_angle(&(axis.normalized() * sight.dot(&z).min(1.0).acos()))
+        }
+    };
+
+    let mut s = Matrix3d::identity();
+    s[(2, 2)] = -1.0;
+
+    let mirrored = to_sight.transpose() * s.clone() * (to_sight * r) * s;
+
+    CameraExtrinsics {
+        rotation: to_axis_angle(&mirrored),
+        translation: translation.clone(),
+    }
+}
+
 fn normalize_ratio(mut v: f64) -> f64 {
     if v < 1.0 {
         v = 1.0 / v;
@@ -345,6 +394,97 @@ fn squared(v: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The blobs a pinhole camera sees of the configured wand at the given
+    /// pose, in the order handle, right, left, centre.
+    fn wand_blobs(
+        config: &WandPatternFinderConfig,
+        intrinsics: &CameraIntrinsicsModel,
+        tilt: &Vector3d,
+        roll: f64,
+        distance: f64
+    ) -> BlobResults {
+        let pose = CameraExtrinsics {
+            rotation: to_axis_angle(&(from_axis_angle(&vec3d(0., 0., roll)) * from_axis_angle(tilt))),
+            translation: vec3d(0.1, -0.05, distance),
+        };
+
+        let points = [
+            vec3d(0., -config.bottom_length(), 0.),
+            vec3d(config.right_arm_length(), 0., 0.),
+            vec3d(-config.left_arm_length(), 0., 0.),
+            vec3d(0., 0., 0.),
+        ];
+
+        let mut results = BlobResults::default();
+        for pt in &points {
+            let px = intrinsics.project_point(&pose.transform(pt));
+            let blob = results.new_blobs();
+            blob.set_x(px.x() as f32);
+            blob.set_y(px.y() as f32);
+            blob.set_radius_a(2.0);
+            blob.set_radius_b(2.0);
+        }
+        results
+    }
+
+    /// The shipped config's wand and finder limits against a Rift CV1 camera
+    /// as its node reports it (a 1280x960 pinhole of about 710 px): the wand
+    /// is found from 1 to 5 m, face on and tilted 35 degrees each way, with
+    /// the right blob on each marker and the pose that was set. (From about
+    /// 40 degrees max_projection_stretch starts dropping close sightings,
+    /// as it does for Dennis's wand.)
+    #[test]
+    fn finds_configured_wand_across_room() {
+        let mut manager_config = MocapManagerConfig::default();
+        protobuf::text::parse_text_proto(
+            include_str!("../../config/manager.txtpb"),
+            &mut manager_config
+        ).unwrap();
+        let config = manager_config.wand();
+
+        let intrinsics = CameraIntrinsicsModel::from_nominal_params(1280, 960, 710., 1.);
+
+        let tilt_angle = 35f64.to_radians();
+        let tilts = [
+            vec3d(0., 0., 0.),
+            vec3d(tilt_angle, 0., 0.),
+            vec3d(-tilt_angle, 0., 0.),
+            vec3d(0., tilt_angle, 0.),
+            vec3d(0., -tilt_angle, 0.),
+        ];
+
+        for distance in [1.0, 1.5, 2.0, 2.5, 3.5, 5.0] {
+            for tilt in &tilts {
+                for roll in [0.0, 1.0, 2.5, 4.0] {
+                    let at = format!("{} m, tilt {:.2},{:.2}, roll {}", distance, tilt.x(), tilt.y(), roll);
+
+                    let blobs = wand_blobs(config, &intrinsics, tilt, roll, distance);
+                    let m = BlobPatternFinder::find_t_wand(config, &intrinsics, &blobs)
+                        .unwrap_or_else(|| panic!("not found at {}", at));
+
+                    // Left, centre, right, handle.
+                    let idxs = m.points.iter().map(|p| p.blob_index).collect::<Vec<_>>();
+                    assert_eq!(&idxs, &[2, 3, 1, 0], "{}", at);
+
+                    // Far inside wanding's limit: the true pose, not its
+                    // mirror (about 0.25 px off at 5 m, 2.8 px at 1.5 m).
+                    assert!(
+                        m.error < manager_config.wanding().max_wand_frame_error() * 0.05,
+                        "error {} at {}", m.error, at);
+                    assert!((m.translation.z() - distance).abs() < 0.01 * distance, "{}", at);
+                }
+            }
+        }
+
+        // Dennis's 20 px limits (for a 1450 px lens and the full-size wand)
+        // lose this wand by 5 m even face on.
+        let mut old = config.clone();
+        old.set_min_blob_center_pixel_distance(20.0);
+        old.set_min_bottom_line_pixel_distance(20.0);
+        let blobs = wand_blobs(&old, &intrinsics, &tilts[0], 0.0, 5.0);
+        assert!(BlobPatternFinder::find_t_wand(&old, &intrinsics, &blobs).is_none());
+    }
 
     #[test]
     fn solve_wand() {

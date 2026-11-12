@@ -737,15 +737,17 @@ impl WandingCalibrationSolver {
                 continue;
             }
 
+            // Cameras without an accelerometer (Rift CV1) have no say in
+            // which way is up.
+            if !cam.camera_status().accelerometer().has_value() {
+                continue;
+            }
+
             let extrinsics = &camera_params.iter().find(|p| p.id == cam_id)
                 .ok_or_else(|| err_msg("Camera not declared in system_state"))?
                 .extrinsics;
 
             let r = from_axis_angle(&extrinsics.rotation);
-
-            if !cam.camera_status().accelerometer().has_value() {
-                return Err(err_msg("Camera missing accelerometer vector"));
-            }
 
             let proto = cam.camera_status().accelerometer().value();
             let accel_vec = Vector3d::from_proto(proto)?;
@@ -753,6 +755,16 @@ impl WandingCalibrationSolver {
             let v: Vector3d = r.transpose() * accel_vec.normalized();
             up_vector += v;
             num_cams += 1;
+        }
+
+        // No camera knows which way is up, so there is nothing to level
+        // against (and the height and yaw steps below assume a level world).
+        // The solution stays in the frame of the wand sighting that seeded
+        // the solve; Set Origin (origin.rs) then takes the floor plane and
+        // the up direction from the wand lying flat.
+        if num_cams == 0 {
+            println!("No camera reports an accelerometer: not levelled. Use Set Origin with the wand flat on the floor.");
+            return Ok(());
         }
 
         up_vector /= (num_cams as f64);
@@ -901,6 +913,91 @@ struct FrameCameraData {
     pattern: BlobPatternMatch,
     points_2d: Vec<Vector2d>,
     points_3d: Vec<Vector3d>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn camera(id: u64, rotation: Vector3d, translation: Vector3d) -> CameraParameters {
+        CameraParameters {
+            id,
+            intrinsics: CameraIntrinsicsModel::from_nominal_params(1280, 960, 710., 1.),
+            extrinsics: CameraExtrinsics { rotation, translation },
+        }
+    }
+
+    /// A manager status with one enabled camera per entry, ids from 1.
+    fn status(accelerometers: &[Option<Vector3d>]) -> MocapManagerStatus {
+        let mut status = MocapManagerStatus::default();
+        for (i, accel) in accelerometers.iter().enumerate() {
+            let id = (i + 1) as u64;
+
+            {
+                let cam = status.new_cameras();
+                cam.set_id(id);
+                if let Some(v) = accel {
+                    cam.camera_status_mut().accelerometer_mut().set_value(v.to_proto());
+                }
+            }
+
+            let per_cam = status.config_mut().new_per_camera();
+            per_cam.set_camera_id(id);
+            per_cam.set_enabled(true);
+        }
+        status
+    }
+
+    /// Rift cameras report no accelerometer: the solve must still finish,
+    /// with the extrinsics left as solved for Set Origin to level.
+    #[test]
+    fn align_without_accelerometers() {
+        let mut solver = WandingCalibrationSolver::new(
+            MocapManagerConfig::default(), HashMap::default());
+        solver.set_initial_status(status(&[None, None]));
+
+        let mut params = vec![
+            camera(1, vec3d(0.1, 0.2, 0.3), vec3d(0.4, 0.5, 0.6)),
+            camera(2, vec3d(-0.3, 0.9, 0.1), vec3d(-1.0, 0.2, 2.5)),
+        ];
+        let before = params.clone();
+
+        solver.align_extrinsics(&mut params).unwrap();
+
+        for (a, b) in params.iter().zip(before.iter()) {
+            assert_eq!(a.extrinsics.rotation, b.extrinsics.rotation);
+            assert_eq!(a.extrinsics.translation, b.extrinsics.translation);
+        }
+    }
+
+    /// Cameras with accelerometers are still levelled, and one without is
+    /// left out of the up vector rather than failing the calibration.
+    #[test]
+    fn align_with_some_accelerometers() {
+        let mut config = MocapManagerConfig::default();
+        config.wanding_mut().set_camera_height_guess(2.1);
+
+        let mut solver = WandingCalibrationSolver::new(config, HashMap::default());
+
+        // Camera 1 has no rotation and reads its own +y as up, so the
+        // world's +y is up before alignment.
+        solver.set_initial_status(status(&[Some(vec3d(0., 1., 0.)), None]));
+
+        let mut params = vec![
+            camera(1, vec3d(0., 0., 0.), vec3d(0., 0., 0.)),
+            camera(2, vec3d(0., 0., 0.), vec3d(-2., 0., 0.)),
+        ];
+
+        solver.align_extrinsics(&mut params).unwrap();
+
+        // The new world's +z is what camera 1 reads as up.
+        let up_in_camera = from_axis_angle(&params[0].extrinsics.rotation) * vec3d(0., 0., 1.);
+        assert!((up_in_camera - vec3d(0., 1., 0.)).norm() < 1e-6);
+
+        // The highest camera sits at the height guess.
+        let z_max = params.iter().map(|p| p.extrinsics.position().z()).fold(f64::MIN, f64::max);
+        assert!((z_max - 2.1).abs() < 1e-6);
+    }
 }
 
 

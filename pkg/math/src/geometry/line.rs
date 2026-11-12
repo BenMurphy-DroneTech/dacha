@@ -113,9 +113,10 @@ impl<T: FloatElementType> Line2<T> {
     /// A 't' value of 0 means we are at the start point. 1 means we are at the end point that was originally given
     /// when constructing the line.
     pub fn t_at_point(&self, point: &Vector2<T>) -> T {
-        let dir_norm = self.dir.clone().normalized();
+        // Over |dir|^2: dividing by |dir| alone gave the distance along the
+        // line, so a point between the two ends read as beyond the end.
         let dir2 = point - &self.base;
-        dir2.dot(&self.dir) / self.dir.norm()
+        dir2.dot(&self.dir) / self.dir.dot(&self.dir)
     }
 
 }

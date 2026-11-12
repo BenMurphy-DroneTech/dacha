@@ -5,7 +5,7 @@
 //! from. This reads one back and runs what wanding.rs runs: the T finder on
 //! each camera's blobs, then WandingCalibrationSolver.
 //!
-//!   rift_wand_replay LOG [--config PATH] [--shift NAME=FRAMES]...
+//!   rift_wand_replay LOG [--config PATH] [--shift NAME=FRAMES]... [--saved CONFIG_PB]
 //!
 //! The config is the one in the log (what the manager ran with) unless
 //! --config names a manager.txtpb to try instead; the cameras' saved
@@ -13,7 +13,13 @@
 //! camera's blobs FRAMES frames later (negative: earlier) before anything
 //! else, to test whether that camera numbers its frames a slot off: if it
 //! does, the shift that undoes it is the one that solves well. Lines for
-//! reading start with "replay:":
+//! reading start with "replay:". --saved reads the manager's saved config
+//! patch (<data dir>/config.pb) and prints where it puts each camera, which
+//! way it looks and which way is down in its picture, in the world Set Origin
+//! left (z up from the floor), with the distances between cameras against
+//! this log's solve: equal if that solve is the one saved.
+//!
+//! Then:
 //!
 //! - the wand and wanding config in force, and each camera's intrinsics;
 //! - per camera: frames by blob count, how many held a T, the T's pose-fit
@@ -73,10 +79,13 @@ async fn main() -> Result<()> {
     let mut log_path: Option<String> = None;
     let mut config_path: Option<String> = None;
     let mut shifts: Vec<(String, i64)> = vec![];
+    let mut saved_path: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--config" {
             config_path = Some(args.next().ok_or_else(|| err_msg("--config needs a path"))?);
+        } else if arg == "--saved" {
+            saved_path = Some(args.next().ok_or_else(|| err_msg("--saved needs a path"))?);
         } else if arg == "--shift" {
             let v = args.next().ok_or_else(|| err_msg("--shift needs NAME=FRAMES"))?;
             let (n, f) = v.split_once('=').ok_or_else(|| err_msg("--shift needs NAME=FRAMES"))?;
@@ -331,6 +340,47 @@ async fn main() -> Result<()> {
                     (a.extrinsics.position() - b.extrinsics.position()).norm());
             }
         }
+    }
+
+    // The saved calibration, against this solve.
+    if let Some(path) = &saved_path {
+        use protobuf::{Message, StaticMessage};
+
+        let saved = MocapManagerConfig::parse(&std::fs::read(path)?)?;
+        let mut positions = vec![];
+        for cam in saved.per_camera() {
+            if !cam.has_extrinsics() {
+                println!("replay: saved {} has no extrinsics", name(cam.camera_id()));
+                continue;
+            }
+
+            let e = CameraExtrinsics::from_proto(cam.extrinsics());
+            let to_world = math::matrix::axis_angle::from_axis_angle(&e.rotation).transpose();
+            let look = to_world.clone() * math::matrix::vec3d(0., 0., 1.);
+            let down = to_world * math::matrix::vec3d(0., 1., 0.);
+            let pos = e.position();
+            let i = vision::CameraIntrinsicsModel::from_proto(cam.intrinsics());
+            println!("replay: saved {} at x {:.3} y {:.3} z {:.3} m; looks along {:.2} {:.2} {:.2}; down in its picture is {:.2} {:.2} {:.2}; f {:.2}, centre {:.2} {:.2}, k1 {:.5}",
+                name(cam.camera_id()), pos.x(), pos.y(), pos.z(), look.x(), look.y(), look.z(),
+                down.x(), down.y(), down.z(), i.focal_length.x(), i.center.x(), i.center.y(), i.k1);
+            positions.push((cam.camera_id(), pos));
+        }
+
+        let mut worst = 0.0f64;
+        for (a, pa) in &positions {
+            for (b, pb) in &positions {
+                if name(*a) < name(*b) {
+                    let saved_d = (pa.clone() - pb.clone()).norm();
+                    let solved_d = match (solved.get(a), solved.get(b)) {
+                        (Some((_, ea)), Some((_, eb))) => (ea.position() - eb.position()).norm(),
+                        _ => continue,
+                    };
+                    println!("replay: saved {} to {}: {:.3} m (this solve {:.3})", name(*a), name(*b), saved_d, solved_d);
+                    worst = worst.max((saved_d - solved_d).abs());
+                }
+            }
+        }
+        println!("replay: saved against this solve: distances differ by up to {:.1} mm", worst * 1000.);
     }
 
     // Cross-check: camera a's own fit of the wand, seen by camera b.

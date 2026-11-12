@@ -91,6 +91,10 @@ pub struct WandingSightingResidual {
 
     /// RMS reprojection error of the wand's points, in pixels.
     pub error: f64,
+
+    /// Each of the wand's points: where the camera saw it, and where the
+    /// solution puts it, in pixels.
+    pub points: Vec<(Vector2d, Vector2d)>,
 }
 
 
@@ -789,16 +793,19 @@ impl WandingCalibrationSolver {
                 let extrinsics = solution.camera_extrinsics(cam_idx);
 
                 let mut sum = 0.0;
+                let mut points = vec![];
                 for (point_2d, point_3d) in cam_data.points_2d.iter().zip(cam_data.points_3d.iter()) {
                     let projected = intrinsics.project_point(
                         &extrinsics.transform(&object.transform(point_3d)));
-                    sum += (projected - point_2d).norm_squared();
+                    sum += (projected.clone() - point_2d).norm_squared();
+                    points.push((point_2d.clone(), projected));
                 }
 
                 out.residuals.push(WandingSightingResidual {
                     frame_timestamp: entry.frame_timestamp,
                     camera_id: *cam_id,
                     error: (sum / (cam_data.points_2d.len() as f64)).sqrt(),
+                    points,
                 });
             }
         }

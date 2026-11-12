@@ -30,6 +30,11 @@
 //!   by camera pair;
 //! - the solve's error and camera positions, the error by camera, by how
 //!   fast the wand moved in the image, and the worst sightings;
+//! - the error by where in the picture a point sits, as its distance from the
+//!   principal point: each camera's own pose fit of the T (every sighting
+//!   kept), then the solve's points, with their mean error along the radius
+//!   (outwards positive) and across it. A lens model that errs towards the
+//!   edges shows as an RMS that grows outwards or a mean that leaves zero;
 //! - a cross-check per camera pair that doesn't lean on the bundle
 //!   adjustment's object poses: one camera's own pose fit of the wand, carried
 //!   through the solved extrinsics into the other camera, against the blobs
@@ -53,6 +58,22 @@ use mocap_proto::mocap::*;
 use vision::CameraExtrinsics;
 
 const ERROR_EDGES: [f64; 5] = [0.25, 0.5, 1.0, 2.0, 5.0];
+
+/// Distance from the principal point, in pixels of the undistorted frame the
+/// blobs are in (about 12, 23, 32 and 40 degrees off axis at 716 px).
+const RADIUS_EDGES: [f64; 6] = [0.0, 150.0, 300.0, 450.0, 600.0, 1e9];
+
+fn radius_bin(radius: f64) -> usize {
+    RADIUS_EDGES[1..].iter().position(|e| radius < *e).unwrap_or(RADIUS_EDGES.len() - 2)
+}
+
+fn radius_label(bin: usize) -> String {
+    if RADIUS_EDGES[bin + 1] > 1e8 {
+        format!("{}-up", RADIUS_EDGES[bin])
+    } else {
+        format!("{}-{}", RADIUS_EDGES[bin], RADIUS_EDGES[bin + 1])
+    }
+}
 
 #[derive(Default)]
 struct CameraStats {
@@ -193,6 +214,9 @@ async fn main() -> Result<()> {
     let mut by_cameras = [0usize; 8];
     // Where the centre marker was, per camera and frame, for the wand's speed.
     let mut centre_at: HashMap<(u64, u64), (f64, f64)> = HashMap::new();
+    // Each camera's own pose fit of the T, by the centre marker's distance
+    // from the principal point: (sightings, sum of squared fit errors).
+    let mut fit_by_radius = [(0usize, 0.0f64); RADIUS_EDGES.len() - 1];
 
     for (entry_i, entry) in entries.iter().enumerate().skip(1) {
         let mut sightings = vec![];
@@ -234,6 +258,13 @@ async fn main() -> Result<()> {
             s.distance_max = s.distance_max.max(d);
 
             if m.error <= max_frame_error {
+                let blob = &cam.results().blobs()[m.points[1].blob_index];
+                let radius = ((blob.x() as f64 - intr.center.x()).powi(2)
+                    + (blob.y() as f64 - intr.center.y()).powi(2)).sqrt();
+                let bin = &mut fit_by_radius[radius_bin(radius)];
+                bin.0 += 1;
+                bin.1 += m.error * m.error;
+
                 sightings.push(Sighting { camera_id: cam.camera_id(), m });
             }
         }
@@ -265,6 +296,10 @@ async fn main() -> Result<()> {
         max_frame_error, by_cameras[0], by_cameras[1], by_cameras[2], by_cameras[3], by_cameras[4]);
     for ((a, b), n) in &pairs {
         println!("replay: {} + {}: {} frames", a, b, n);
+    }
+    for (bin, (n, sum)) in fit_by_radius.iter().enumerate() {
+        println!("replay: T's own fit, centre marker {} px from the principal point: {} sightings, RMS {:.3} px",
+            radius_label(bin), n, (sum / (*n).max(1) as f64).sqrt());
     }
 
     // The solve, as wanding.rs runs it.
@@ -313,6 +348,50 @@ async fn main() -> Result<()> {
                 .map(|r| r.error).collect();
             println!("replay: wand moving {}-{} px a frame: {} sightings, RMS {:.2} px",
                 w[0], if w[1] > 1e8 { "up".to_string() } else { w[1].to_string() }, v.len(), rms(&v));
+        }
+
+        // By where in the picture: (points, squared error, error along the
+        // radius, error across it), for every camera and for each.
+        let mut by_radius = [(0usize, 0.0f64, 0.0f64, 0.0f64); RADIUS_EDGES.len() - 1];
+        let mut outer: BTreeMap<String, (usize, f64, f64)> = BTreeMap::new();
+        for r in &solution.residuals {
+            let centre = match intrinsics.get(&r.camera_id) {
+                Some(i) => (i.center.x(), i.center.y()),
+                None => continue,
+            };
+            for (seen, projected) in &r.points {
+                let (rx, ry) = (seen.x() - centre.0, seen.y() - centre.1);
+                let radius = (rx * rx + ry * ry).sqrt();
+                if radius < 1e-6 {
+                    continue;
+                }
+                let (dx, dy) = (seen.x() - projected.x(), seen.y() - projected.y());
+                let along = (dx * rx + dy * ry) / radius;
+                let across = (dy * rx - dx * ry) / radius;
+
+                let bin = &mut by_radius[radius_bin(radius)];
+                bin.0 += 1;
+                bin.1 += dx * dx + dy * dy;
+                bin.2 += along;
+                bin.3 += across;
+
+                if radius >= RADIUS_EDGES[3] {
+                    let o = outer.entry(name(r.camera_id)).or_default();
+                    o.0 += 1;
+                    o.1 += dx * dx + dy * dy;
+                    o.2 += along;
+                }
+            }
+        }
+        for (bin, (n, sq, along, across)) in by_radius.iter().enumerate() {
+            let d = (*n).max(1) as f64;
+            println!("replay: solve, points {} px from the principal point: {} points, RMS {:.3} px, mean outwards {:+.3}, across {:+.3}",
+                radius_label(bin), n, (sq / d).sqrt(), along / d, across / d);
+        }
+        for (camera, (n, sq, along)) in &outer {
+            let d = (*n).max(1) as f64;
+            println!("replay: solve, {} past {} px: {} points, RMS {:.3} px, mean outwards {:+.3}",
+                camera, RADIUS_EDGES[3], n, (sq / d).sqrt(), along / d);
         }
 
         let mut worst: Vec<_> = solution.residuals.iter().collect();

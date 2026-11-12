@@ -332,6 +332,15 @@ impl<'a> BlobPatternFinder<'a> {
             return None;
         }
 
+        // The mirrored pose above keeps the side the camera sees, so this
+        // doesn't hang on which of the two won.
+        if self.config.one_sided() {
+            let normal = from_axis_angle(&solution.rotation) * vec3d(0., 0., 1.);
+            if normal.dot(&solution.translation) > 0. {
+                return None;
+            }
+        }
+
         Some(BlobPatternMatch {
             error: solution.error,
             translation: solution.translation,
@@ -396,16 +405,21 @@ mod tests {
     use super::*;
 
     /// The blobs a pinhole camera sees of the configured wand at the given
-    /// pose, in the order handle, right, left, centre.
+    /// pose, in the order handle, right, left, centre. 'front' turns the
+    /// wand's marker side (+z) to the camera; without it the camera sees the
+    /// back, as it would a reflection.
     fn wand_blobs(
         config: &WandPatternFinderConfig,
         intrinsics: &CameraIntrinsicsModel,
         tilt: &Vector3d,
         roll: f64,
-        distance: f64
+        distance: f64,
+        front: bool
     ) -> BlobResults {
+        let turn = vec3d(if front { std::f64::consts::PI } else { 0. }, 0., 0.);
         let pose = CameraExtrinsics {
-            rotation: to_axis_angle(&(from_axis_angle(&vec3d(0., 0., roll)) * from_axis_angle(tilt))),
+            rotation: to_axis_angle(&(
+                from_axis_angle(&vec3d(0., 0., roll)) * from_axis_angle(tilt) * from_axis_angle(&turn))),
             translation: vec3d(0.1, -0.05, distance),
         };
 
@@ -459,7 +473,7 @@ mod tests {
                 for roll in [0.0, 1.0, 2.5, 4.0] {
                     let at = format!("{} m, tilt {:.2},{:.2}, roll {}", distance, tilt.x(), tilt.y(), roll);
 
-                    let blobs = wand_blobs(config, &intrinsics, tilt, roll, distance);
+                    let blobs = wand_blobs(config, &intrinsics, tilt, roll, distance, true);
                     let m = BlobPatternFinder::find_t_wand(config, &intrinsics, &blobs)
                         .unwrap_or_else(|| panic!("not found at {}", at));
 
@@ -482,8 +496,20 @@ mod tests {
         let mut old = config.clone();
         old.set_min_blob_center_pixel_distance(20.0);
         old.set_min_bottom_line_pixel_distance(20.0);
-        let blobs = wand_blobs(&old, &intrinsics, &tilts[0], 0.0, 5.0);
+        let blobs = wand_blobs(&old, &intrinsics, &tilts[0], 0.0, 5.0, true);
         assert!(BlobPatternFinder::find_t_wand(&old, &intrinsics, &blobs).is_none());
+
+        // The markers stand on a plate: a view of the wand's back can only be
+        // a reflection, and is dropped. A wand open to both sides keeps it.
+        assert!(config.one_sided());
+        for tilt in &tilts {
+            let blobs = wand_blobs(config, &intrinsics, tilt, 1.0, 2.0, false);
+            assert!(BlobPatternFinder::find_t_wand(config, &intrinsics, &blobs).is_none());
+
+            let mut open = config.clone();
+            open.set_one_sided(false);
+            assert!(BlobPatternFinder::find_t_wand(&open, &intrinsics, &blobs).is_some());
+        }
     }
 
     #[test]

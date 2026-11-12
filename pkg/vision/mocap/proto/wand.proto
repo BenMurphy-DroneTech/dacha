@@ -41,5 +41,15 @@ message WandPatternFinderConfig {
 
     // Minimum distance of the bottom arm point from the line formed by
     // the other three points.
-    double min_bottom_line_pixel_distance = 12; 
+    double min_bottom_line_pixel_distance = 12;
+
+    // The markers can only be seen from the wand's +z side (they sit on an
+    // opaque plate, say): a sighting whose pose has +z turned away from the
+    // camera is dropped. With the left arm to the left and the bottom arm
+    // towards the viewer, +z points up at the viewer.
+    //
+    // A view from the back is what a reflection of the wand looks like (a
+    // mirror, a window, a glossy floor): it fits one camera exactly, in the
+    // wrong place.
+    bool one_sided = 13;
 }

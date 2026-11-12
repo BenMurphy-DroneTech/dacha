@@ -37,6 +37,28 @@ TODO: Need to support calibration using a subset of cameras if we need to disabl
 */
 
 
+/// The intrinsics a wanding run starts from: the config's, except that with
+/// wanding.freeze_intrinsics a camera that reports factory intrinsics uses
+/// those. The solve then hands them back unchanged, so what an earlier solve
+/// left in the config can't carry over.
+pub fn wanding_intrinsics(
+    config: &ManagerConfigContainer,
+    status: &MocapManagerStatus
+) -> HashMap<u64, CameraIntrinsicsModel, FastHasherBuilder> {
+    let mut out = config.camera_intrinsics().clone();
+
+    if config.wanding().freeze_intrinsics() {
+        for cam in status.cameras() {
+            let hardware = cam.camera_status().hardware_config();
+            if hardware.has_factory_intrinsics() {
+                out.insert(cam.id(), CameraIntrinsicsModel::from_proto(hardware.factory_intrinsics()));
+            }
+        }
+    }
+
+    out
+}
+
 pub struct WandingCalibrationSolver {
     config: MocapManagerConfig,
     camera_intrinsics: HashMap<u64, CameraIntrinsicsModel, FastHasherBuilder>,
@@ -55,7 +77,20 @@ pub struct WandingCalibrationSolver {
 #[derive(Clone)]
 pub struct WandingCalibrationSolution {
     pub error: f64,
-    pub params: Vec<CameraParameters>
+    pub params: Vec<CameraParameters>,
+
+    /// How well each sighting the solve used fits the solution.
+    pub residuals: Vec<WandingSightingResidual>,
+}
+
+/// One camera's view of the wand in one frame, against the solution.
+#[derive(Clone, Debug)]
+pub struct WandingSightingResidual {
+    pub frame_timestamp: u64,
+    pub camera_id: u64,
+
+    /// RMS reprojection error of the wand's points, in pixels.
+    pub error: f64,
 }
 
 
@@ -153,6 +188,7 @@ impl WandingCalibrationSolver {
         }
 
         self.frames.push(FrameData {
+            frame_timestamp: entry.blobs().frame_timestamp(),
             cameras: cameras_data
         });
 
@@ -184,6 +220,45 @@ impl WandingCalibrationSolver {
 
         println!("Optimizing...");
         let mut solution = self.optimize(&data, anchor_camera_id, &camera_initial_extrinsics)?;
+
+        // Drop the frames the solution can't fit and solve again from where
+        // it got to. The cut comes down by halves from the worst frame, so a
+        // solve dragged off by a few wild frames isn't asked to judge the
+        // good ones at the final limit straight away.
+        let max_error = self.config.wanding().max_solved_frame_error();
+        if max_error > 0.0 {
+            const MAX_ROUNDS: usize = 8;
+
+            for _ in 0..MAX_ROUNDS {
+                let worst = solution.residuals.iter().map(|r| r.error).fold(0.0, f64::max);
+                if worst <= max_error {
+                    break;
+                }
+
+                let cut = max_error.max(worst / 2.0);
+                let dropped = solution.residuals.iter()
+                    .filter(|r| r.error > cut)
+                    .map(|r| r.frame_timestamp)
+                    .collect::<std::collections::HashSet<u64>>();
+
+                let num_before = data.len();
+                data.retain(|frame| !dropped.contains(&frame.frame_timestamp));
+                println!(
+                    "Dropped {} of {} frames over {:.2} px (worst {:.2}). Optimizing again...",
+                    num_before - data.len(), num_before, cut, worst);
+
+                if data.is_empty() {
+                    return Err(err_msg("No frames fit the solution"));
+                }
+
+                let mut extrinsics = HashMap::<u64, CameraExtrinsics, FastHasherBuilder>::default();
+                for p in &solution.params {
+                    extrinsics.insert(p.id, p.extrinsics.clone());
+                }
+
+                solution = self.optimize(&data, anchor_camera_id, &extrinsics)?;
+            }
+        }
 
         self.align_extrinsics(&mut solution.params)?;
 
@@ -571,7 +646,9 @@ impl WandingCalibrationSolver {
             );
             // TODO: If we know that initial intrinsics were calibrated from this camera
             // without modifications, contrain how much the intrinsics are allowed to change.
-            // solver.freeze_camera_intrinsics(idx);
+            if self.config.wanding().freeze_intrinsics() {
+                solver.freeze_camera_intrinsics(idx);
+            }
 
             camera_id_to_index.insert(*id, idx);
         }
@@ -698,8 +775,33 @@ impl WandingCalibrationSolver {
 
         let mut out = WandingCalibrationSolution {
             error: solution.error(),
-            params: vec![]
+            params: vec![],
+            residuals: vec![],
         };
+
+        // Objects were added in the order of 'data'.
+        for (object_idx, entry) in data.iter().enumerate() {
+            let object = solution.object_extrinsics(object_idx);
+
+            for (cam_id, cam_data) in &entry.cameras {
+                let cam_idx = *camera_id_to_index.get(cam_id).unwrap();
+                let intrinsics = solution.camera_intrinsics(cam_idx);
+                let extrinsics = solution.camera_extrinsics(cam_idx);
+
+                let mut sum = 0.0;
+                for (point_2d, point_3d) in cam_data.points_2d.iter().zip(cam_data.points_3d.iter()) {
+                    let projected = intrinsics.project_point(
+                        &extrinsics.transform(&object.transform(point_3d)));
+                    sum += (projected - point_2d).norm_squared();
+                }
+
+                out.residuals.push(WandingSightingResidual {
+                    frame_timestamp: entry.frame_timestamp,
+                    camera_id: *cam_id,
+                    error: (sum / (cam_data.points_2d.len() as f64)).sqrt(),
+                });
+            }
+        }
 
         for (cam_id, cam_idx) in camera_id_to_index {
             out.params.push(CameraParameters {
@@ -904,6 +1006,7 @@ fn pattern_positions_distinct(a: &BlobPatternMatch, b: &BlobPatternMatch) -> boo
 }
 
 struct FrameData {
+    frame_timestamp: u64,
     cameras: HashMap<u64, FrameCameraData, FastHasherBuilder>
 
 }
@@ -946,6 +1049,147 @@ mod tests {
             per_cam.set_enabled(true);
         }
         status
+    }
+
+    /// A camera at 'position' looking at 'target', x to its right.
+    fn looking_at(id: u64, position: &Vector3d, target: &Vector3d) -> CameraParameters {
+        let z = (target.clone() - position.clone()).normalized();
+        let x = z.cross(&vec3d(0., 0., 1.)).normalized();
+        let y = z.cross(&x);
+
+        let mut axes = Matrix3d::zero();
+        axes.col_mut(0).copy_from(&x);
+        axes.col_mut(1).copy_from(&y);
+        axes.col_mut(2).copy_from(&z);
+        let r = axes.transpose();
+
+        let translation = (r.clone() * position.clone()) * -1.0;
+        camera(id, to_axis_angle(&r), translation)
+    }
+
+    /// The whole wanding solve on made-up sightings, with the shipped config:
+    /// three cameras a few metres from a wand that keeps its markers towards
+    /// them. Some frames carry what a first wanding on real cameras held and
+    /// the solve can't absorb: a view of the wand's back (a reflection), and
+    /// sightings that fit their own camera but sit in the wrong place.
+    #[test]
+    fn solves_through_reflections_and_stray_sightings() {
+        let mut config = MocapManagerConfig::default();
+        protobuf::text::parse_text_proto(
+            include_str!("../../config/manager.txtpb"),
+            &mut config
+        ).unwrap();
+        config.clear_per_camera();
+        assert!(config.wanding().freeze_intrinsics());
+        assert!(config.wanding().max_solved_frame_error() > 0.0);
+
+        let target = vec3d(0., 0., 1.0);
+        let truth = vec![
+            looking_at(1, &vec3d(3.0, -1.6, 1.8), &target),
+            looking_at(2, &vec3d(3.4, 0.0, 1.2), &target),
+            looking_at(3, &vec3d(3.0, 1.6, 2.0), &target),
+        ];
+
+        let mut intrinsics = HashMap::<u64, CameraIntrinsicsModel, FastHasherBuilder>::default();
+        for cam in &truth {
+            intrinsics.insert(cam.id, cam.intrinsics.clone());
+        }
+
+        let mut seed = 12345u64;
+        let mut random = move || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 33) as f64) / ((1u64 << 31) as f64)
+        };
+
+        let w = config.wand().clone();
+        let model = [
+            vec3d(-w.left_arm_length(), 0., 0.),
+            vec3d(0., 0., 0.),
+            vec3d(w.right_arm_length(), 0., 0.),
+            vec3d(0., -w.bottom_length(), 0.),
+        ];
+
+        const STEP: u64 = 11_111_000;
+        let reflected = [7u64, 23];
+        let stray = [11u64, 31, 40];
+
+        let mut solver = WandingCalibrationSolver::new(config.clone(), intrinsics);
+        solver.set_initial_status(status(&[None, None, None]));
+
+        for frame in 0..60u64 {
+            // Markers towards the cameras (+x), turned and tipped a little.
+            let position = vec3d(random() - 0.5, random() - 0.5, 0.6 + 0.8 * random());
+            let pose = {
+                let towards = (vec3d(3.2, 0., 1.6) - position.clone()).normalized();
+                let side = towards.cross(&vec3d(0., 0., 1.)).normalized();
+                let mut r = Matrix3d::zero();
+                r.col_mut(0).copy_from(&side);
+                r.col_mut(1).copy_from(&towards.cross(&side));
+                r.col_mut(2).copy_from(&towards);
+
+                let roll = from_axis_angle(&vec3d(0., 0., 6.28 * random()));
+                let tip = from_axis_angle(&vec3d(0.3 * (random() - 0.5), 0.3 * (random() - 0.5), 0.));
+                CameraExtrinsics { rotation: to_axis_angle(&(r * tip * roll)), translation: position }
+            };
+
+            let mut entry = MocapLogEntry::default();
+            entry.blobs_mut().set_frame_timestamp(frame * STEP);
+
+            for cam in &truth {
+                let results = entry.blobs_mut().new_cameras();
+                results.set_camera_id(cam.id);
+
+                for point in &model {
+                    let mut world = pose.transform(point);
+                    if reflected.contains(&frame) && cam.id == 2 {
+                        // In a mirror on the wall at y = -2.
+                        world[1] = -4.0 - world[1];
+                    }
+
+                    let mut px = cam.intrinsics.project_point(&cam.extrinsics.transform(&world));
+                    if stray.contains(&frame) && cam.id == 3 {
+                        px += vec2d(25., -15.);
+                    }
+
+                    let blob = results.results_mut().new_blobs();
+                    blob.set_x(px.x() as f32);
+                    blob.set_y(px.y() as f32);
+                    blob.set_radius_a(2.0);
+                    blob.set_radius_b(2.0);
+                }
+            }
+
+            solver.add_frame(&entry).unwrap();
+        }
+
+        let solution = solver.solve().unwrap();
+
+        // The blobs are f32, good to about 1e-4 px.
+        assert!(solution.error < 0.01, "error {}", solution.error);
+
+        // The stray sightings fit their own camera, so they got as far as the
+        // solve, and were dropped from it.
+        for r in &solution.residuals {
+            assert!(!stray.contains(&(r.frame_timestamp / STEP)) || r.camera_id != 3,
+                "stray frame {} kept", r.frame_timestamp / STEP);
+            assert!(!reflected.contains(&(r.frame_timestamp / STEP)) || r.camera_id != 2,
+                "reflected frame {} kept", r.frame_timestamp / STEP);
+        }
+        assert!(solution.residuals.len() > 100);
+
+        // The cameras stand as they were set, each with its own lens model.
+        for a in &truth {
+            let solved_a = solution.params.iter().find(|p| p.id == a.id).unwrap();
+            assert_eq!(solved_a.intrinsics.focal_length, a.intrinsics.focal_length);
+            assert_eq!(solved_a.intrinsics.center, a.intrinsics.center);
+
+            for b in &truth {
+                let solved_b = solution.params.iter().find(|p| p.id == b.id).unwrap();
+                let set = (a.extrinsics.position() - b.extrinsics.position()).norm();
+                let solved = (solved_a.extrinsics.position() - solved_b.extrinsics.position()).norm();
+                assert!((set - solved).abs() < 0.001, "{} to {}: {} m, set {}", a.id, b.id, solved, set);
+            }
+        }
     }
 
     /// Rift cameras report no accelerometer: the solve must still finish,

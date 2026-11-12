@@ -607,7 +607,7 @@ impl MocapManagerInner {
 
                     let mode = WandingCalibrationMode::create(
                         config.value().clone(),
-                        config.camera_intrinsics().clone(),
+                        crate::calibration::wanding_intrinsics(&config, &initial_status),
                         &self.shared.data_dir,
                         initial_status,
                         subscriber

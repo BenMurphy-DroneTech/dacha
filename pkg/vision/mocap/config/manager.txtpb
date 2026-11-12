@@ -100,6 +100,11 @@ wand {
     max_reprojection_error: 5.0
     collinear_pixel_threshold: 3.0
     min_bottom_line_pixel_distance: 10.0
+
+    # The markers stand on a plate, seen from above only. A first wanding
+    # held 1-2% of sightings from the back (reflections), each fitting its
+    # own camera and 35 px off between cameras: a 7 px solve.
+    one_sided: true
 }
 
 checkerboard {
@@ -111,6 +116,14 @@ checkerboard {
 wanding {
     max_wand_frame_error: 1
     camera_height_guess: 2.1
+    # The Rift node reports each camera's own factory calibration, already
+    # undistorted to a pinhole: solving for focal length, centre and k1/k2 as
+    # well ran away on a first wanding (f 415 to 817 px, 6.3 px error).
+    freeze_intrinsics: true
+    # Frames the solution can't fit to 1 px in every camera are dropped and
+    # the rest solved again (sightings that are part reflection fit their own
+    # camera and nothing else).
+    max_solved_frame_error: 1
 }
 
 rigid_body_tracker {

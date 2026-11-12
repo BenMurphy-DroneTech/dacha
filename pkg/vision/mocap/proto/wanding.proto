@@ -15,6 +15,27 @@ message WandingCalibrationConfig {
     double max_wand_frame_error = 1;
 
     double camera_height_guess = 2;
+
+    // Leave every camera's intrinsics out of the solve, and start from the
+    // factory intrinsics each camera reports rather than the config's.
+    //
+    // For cameras whose reported model is already their own calibration (a
+    // Rift CV1 node undistorts with the lens calibration in the camera's
+    // flash and reports the pinhole left over). Fitting focal length, centre
+    // and k1/k2 as well needs far more sightings, spread over the whole
+    // image, than a few cameras' shared views of the wand give.
+    bool freeze_intrinsics = 3;
+
+    // After the solve, the largest error in pixels (RMS over the wand's
+    // points, in any one camera) a frame may have against the solution.
+    // Frames over it are dropped and the rest solved again, a few times over,
+    // the worst first. 0 keeps every frame.
+    //
+    // max_wand_frame_error only tests each camera's sighting on its own. One
+    // that fits its own camera and not the others (a reflection, a blob that
+    // isn't a marker standing in for one) passes that, and the solve has no
+    // robust loss: a few of them at tens of pixels set the whole error.
+    double max_solved_frame_error = 4;
 }
 
 message WandingCalibrationState {

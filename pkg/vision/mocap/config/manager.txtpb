@@ -85,8 +85,8 @@ wand {
     left_arm_length: 0.21213
     right_arm_length: 0.10607
     bottom_length: 0.14142
-    # Placeholder, about right: the plate has no feet yet. Only Set Origin
-    # uses it (the floor's level); measure floor to sphere centres.
+    # Measured from the plate's base to the sphere centres, the wand lying
+    # flat. Only Set Origin uses it (the floor's level).
     height: 0.0595
 
     # The Rift's lens is about 710 px to Dennis's 1450, and the wand is 85%

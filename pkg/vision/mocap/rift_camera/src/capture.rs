@@ -227,10 +227,12 @@ async fn stream(config: &RiftCameraConfig, options: &CaptureOptions, counters: &
             intrinsics.center_mut()[1] += 0.5;
             camera.set_factory_intrinsics(intrinsics);
             detector.set_lens(Some(lens));
+            previews.set_view(Some(lens), config.row_start);
         }
         Err(e) => {
             eprintln!("{}: no lens calibration ({}); blob centres stay distorted", config.serial, e);
             detector.set_lens(None);
+            previews.set_view(None, config.row_start);
         }
     }
     println!("{}: synced: exposure {} lines = {:.1} us at {:.2} MHz, radio exposure {} us, rows {}-{}, {} warnings",

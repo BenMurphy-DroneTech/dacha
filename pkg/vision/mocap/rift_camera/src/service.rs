@@ -34,8 +34,10 @@ impl RiftCameraService {
         let sensor = status.sensor_mut();
         sensor.set_model_name("ar0134 (Rift CV1)");
         sensor.set_max_frame_rate((1_000_000 / period_us) as u32);
-        sensor.set_frame_width(FRAME_WIDTH);
-        sensor.set_frame_height(FRAME_HEIGHT);
+        // The frame the blob centres and previews are in: the full sensor,
+        // undistorted (detect.rs, preview.rs), not the 960x576 window.
+        sensor.set_frame_width(rift_camera::lens::SENSOR_WIDTH);
+        sensor.set_frame_height(rift_camera::lens::SENSOR_HEIGHT);
         sensor.set_max_exposure_micros(exposure_us as u32);
         sensor.set_min_exposure_micros(exposure_us as u32);
 

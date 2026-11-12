@@ -57,7 +57,7 @@ sphere_projection_filter {
 frame_aggregation_timeout: 0.020  # 20ms
 
 matching {
-    min_num_matches: 3
+    min_num_matches: 2
     min_num_rematches: 2
     max_reprojection_error: 2.0
     min_marker_distance: 0.015

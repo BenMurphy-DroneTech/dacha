@@ -58,8 +58,9 @@ const SHIFT_RUN: usize = 5;
 /// bending (the Pi's clock changing rate), not the grid moving: a 500 ppm slew
 /// puts the run at most 80 us off, and the nodes take 2 ms.
 const FOLLOW_NS: f64 = 200_000.0;
-/// Boundaries kept from before the run when the fit restarts on a bend. Short
-/// enough that the fit turns with a 500 ppm change inside it (37 us at most).
+/// Boundaries kept from before the run when the fit restarts on a bend: at the
+/// rates a timesyncd poll gives they are on the new line already. If the run
+/// doesn't fit with them, the fit restarts from the run alone.
 const FOLLOW_KEEP_NS: i64 = 500_000_000;
 /// No edge for this long ends the generation.
 const GAP_NS: i64 = 1_000_000_000;

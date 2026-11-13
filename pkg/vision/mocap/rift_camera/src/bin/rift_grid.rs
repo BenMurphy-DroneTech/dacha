@@ -18,7 +18,12 @@
 //! more than a second, or a run of edges off the line that agree with each
 //! other (the beacon's clock wrap moves the grid ~10.2 ms every 71.6 min; a
 //! beacon restart moves it anywhere), starts a new one, published after a
-//! second of clean edges. frame_timestamp only ever increases: within a
+//! second of clean edges. A run that is only a little off the line is the line
+//! bending instead: the Pi's clock changes rate when NTP corrects it (tens of
+//! ppm at a systemd-timesyncd poll, up to 500 ppm), faster than a 10 s fit can
+//! turn. The fit then restarts from the newest boundaries and the generation
+//! and its numbering carry on, so the nodes never go without a grid.
+//! frame_timestamp only ever increases: within a
 //! generation each re-anchoring carries the previous mapping on, and a new
 //! generation (or a restart of rift_grid that finds a grid in /dev/shm)
 //! starts strictly after anything published before.
@@ -49,6 +54,13 @@ const WHOLE_TOL_NS: f64 = 100_000.0;
 /// This many consecutive outliers that agree with each other mean the grid
 /// moved.
 const SHIFT_RUN: usize = 5;
+/// A run of outliers all within this of the line, on its slots, is the line
+/// bending (the Pi's clock changing rate), not the grid moving: a 500 ppm slew
+/// puts the run at most 80 us off, and the nodes take 2 ms.
+const FOLLOW_NS: f64 = 200_000.0;
+/// Boundaries kept from before the run when the fit restarts on a bend. Short
+/// enough that the fit turns with a 500 ppm change inside it (37 us at most).
+const FOLLOW_KEEP_NS: i64 = 500_000_000;
 /// No edge for this long ends the generation.
 const GAP_NS: i64 = 1_000_000_000;
 /// Clean edges needed before a generation is published.
@@ -310,7 +322,8 @@ fn fit_line(points: &VecDeque<(i64, i64)>) -> Option<Fit> {
 // ---------- the tracker ----------
 
 struct Tracker {
-    map: GridMap,
+    /// None in tests.
+    map: Option<GridMap>,
     /// The last grid written (or the one a previous rift_grid left).
     published: Option<Grid>,
     generation: u64,
@@ -328,11 +341,12 @@ struct Tracker {
     missed: u64,
     outliers: u64,
     new_gens: u64,
+    bends: u64,
 }
 
 impl Tracker {
-    fn new(map: GridMap) -> Self {
-        let published = map.last();
+    fn new(map: Option<GridMap>) -> Self {
+        let published = map.as_ref().and_then(|m| m.last());
         let generation = published.map(|g| g.generation + 1).unwrap_or(1);
         if let Some(g) = &published {
             println!("Previous grid: generation {}, anchor ts {} ns; carrying frame_timestamp on as generation {}",
@@ -343,8 +357,46 @@ impl Tracker {
         Self {
             map, published, generation, gen_published: false, window: VecDeque::new(), last: None,
             fit: None, suspects: Vec::new(), last_raw: mono_ns(), lost_logged: false,
-            last_published_index: None, edges: 0, missed: 0, outliers: 0, new_gens: 0,
+            last_published_index: None, edges: 0, missed: 0, outliers: 0, new_gens: 0, bends: 0,
         }
+    }
+
+    /// A run of outliers close to the line: restarts the fit from the newest
+    /// boundaries, in the same generation. False if the run isn't on the
+    /// line's slots, one after another.
+    fn follow(&mut self, fit: &Fit, run: &[(i64, f64)], shift: f64) -> bool {
+        let mut points = [(0i64, 0i64); SHIFT_RUN];
+        let mut li = self.last.map(|l| l.0).unwrap_or(i64::MIN);
+        for (p, &(t, _)) in points.iter_mut().zip(run) {
+            let (i, _) = fit.nearest(t);
+            if i <= li {
+                return false;
+            }
+            li = i;
+            *p = (i, t);
+        }
+        let keep_from = run[0].0 - FOLLOW_KEEP_NS;
+        while self.window.front().map_or(false, |&(_, t)| t < keep_from) {
+            self.window.pop_front();
+        }
+        for &(i, t) in &points {
+            self.accept(i, t);
+        }
+        self.refit();
+        // A change of rate leaves the boundaries kept on the new line. If the
+        // run doesn't fit with them (a small step), it stands alone.
+        let fits = self.fit.map_or(false, |f| {
+            points.iter().all(|&(i, t)| (t as f64 - f.time(i)).abs() <= OUTLIER_NS / 2.0)
+        });
+        if !fits {
+            self.window.clear();
+            self.window.extend(points.iter().copied());
+            self.fit = fit_line(&self.window);
+        }
+        self.bends += 1;
+        println!("Generation {}: grid bent {:+.1} us; following it{}", self.generation, shift / 1e3,
+                 if fits { "" } else { " from the run alone" });
+        true
     }
 
     /// Ends the generation (or restarts the warm-up if it was never published).
@@ -431,6 +483,11 @@ impl Tracker {
                 let run = std::mem::take(&mut self.suspects);
                 self.outliers -= run.len() as u64;
                 let shift = run.iter().map(|s| s.1).sum::<f64>() / run.len() as f64;
+                if run.len() == SHIFT_RUN && run.iter().all(|s| s.1.abs() <= FOLLOW_NS)
+                    && self.follow(&fit, &run, shift)
+                {
+                    return;
+                }
                 self.new_generation(&format!("grid moved {:+.1} us", shift / 1e3));
                 for (t, _) in run {
                     self.warm(t);
@@ -503,7 +560,9 @@ impl Tracker {
             last_edge_mono_ns: b_new,
             fit_rms_ns: fit.rms,
         };
-        self.map.write(&grid);
+        if let Some(map) = &self.map {
+            map.write(&grid);
+        }
         if !self.gen_published {
             println!("Generation {} published: period {:.1} ns ({:+.2} ppm), rms {:.2} us, anchor ts {} ns, \
                       {} boundaries", self.generation, fit.period, ppm(fit.period), fit.rms / 1e3, anchor_ts,
@@ -519,14 +578,16 @@ impl Tracker {
             Some(f) => format!("period {:.1} ns ({:+.2} ppm), rms {:.2} us", f.period, ppm(f.period), f.rms / 1e3),
             None => "not fitted".to_string(),
         };
-        println!("edges {} ({:.1}/s), missed {}, outliers {}, {}, generation {}{}{}",
+        println!("edges {} ({:.1}/s), missed {}, outliers {}, {}, generation {}{}{}{}",
                  self.edges, self.edges as f64 / seconds, self.missed, self.outliers, fit, self.generation,
                  if self.gen_published { "" } else { " (warming up)" },
-                 if self.new_gens > 0 { format!(", {} new generations", self.new_gens) } else { String::new() });
+                 if self.new_gens > 0 { format!(", {} new generations", self.new_gens) } else { String::new() },
+                 if self.bends > 0 { format!(", {} bends followed", self.bends) } else { String::new() });
         self.edges = 0;
         self.missed = 0;
         self.outliers = 0;
         self.new_gens = 0;
+        self.bends = 0;
     }
 }
 
@@ -570,7 +631,7 @@ fn run() -> Result<()> {
     println!("rift_grid: {} line {} (boundary = rising edge + {} us), publishing to {}",
              args.chip, args.line, FLASH_LEAD_NS / 1000, rift_camera::grid::GRID_PATH);
 
-    let mut tracker = Tracker::new(map);
+    let mut tracker = Tracker::new(Some(map));
     let start = mono_ns();
     let (mut last_publish, mut last_log, mut last_flash) = (start, start, i64::MIN / 2);
     let mut edges = Vec::new();
@@ -615,5 +676,90 @@ fn main() {
     if let Err(e) = run() {
         eprintln!("rift_grid: {}", e);
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Feeds edges whose spacing follows rate(seconds), in ppm off nominal,
+    /// with +-5 us of jitter and step_ns added from step_at seconds on,
+    /// publishing every 9 edges as run() does every 100 ms. Returns the
+    /// tracker, how many generations started after the first, and whether
+    /// every published grid gives each boundary the number the first gave it.
+    fn feed(seconds: f64, rate: impl Fn(f64) -> f64, step_at: f64, step_ns: i64) -> (Tracker, u64, bool) {
+        let mut tr = Tracker::new(None);
+        let (mut t, mut seed) = (1_000_000_000.0f64, 12345u64);
+        let (mut new_gens, mut numbered) = (0u64, true);
+        let mut first: Option<(u64, i64)> = None; // (frame_timestamp, edge number) at the first publish
+        let n = (seconds * 90.0) as i64;
+        for e in 0..n {
+            let secs = e as f64 / 90.0;
+            t += NOMINAL_NS * (1.0 + rate(secs) * 1e-6);
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let jitter = ((seed >> 33) % 10_001) as i64 - 5_000;
+            let step = if secs >= step_at { step_ns } else { 0 };
+            let edge = t as i64 + jitter + step;
+            tr.edge(edge);
+            new_gens += tr.new_gens;
+            tr.new_gens = 0;
+            if e % 9 == 8 {
+                tr.publish();
+                if let Some(g) = tr.published {
+                    // This edge's number on the grid as published (the anchor
+                    // is the last boundary accepted, which may be an older one).
+                    let ts = g.frame_timestamp(g.slot(edge).0);
+                    match first {
+                        None => first = Some((ts, e)),
+                        Some((ts0, e0)) => {
+                            numbered &= ts as i64 == ts0 as i64 + (e - e0) * FRAME_TIMESTAMP_STEP_NS as i64;
+                        }
+                    }
+                }
+            }
+        }
+        (tr, new_gens, numbered)
+    }
+
+    #[test]
+    fn a_steady_clock_keeps_one_generation() {
+        let (tr, new_gens, numbered) = feed(40.0, |_| -5.0, f64::MAX, 0);
+        assert_eq!((tr.generation, new_gens, tr.bends), (1, 0, 0));
+        assert!(numbered);
+    }
+
+    #[test]
+    fn a_change_of_clock_rate_is_followed() {
+        // What a timesyncd poll does on Pi 1 (-5 to +66 ppm at once, then
+        // decaying), and the kernel's fastest slew either way.
+        for to in [66.0, -66.0, 500.0, -500.0] {
+            let (tr, new_gens, numbered) = feed(40.0, |s| if s < 20.0 { -5.0 } else { to }, f64::MAX, 0);
+            assert_eq!((tr.generation, new_gens), (1, 0), "to {} ppm", to);
+            assert!(tr.bends >= 1, "to {} ppm", to);
+            assert!(numbered, "to {} ppm", to);
+            let period = tr.fit.unwrap().period;
+            assert!((ppm(period) - to).abs() < 3.0, "to {} ppm: fitted {:.2}", to, ppm(period));
+        }
+    }
+
+    #[test]
+    fn a_small_step_is_followed() {
+        for step in [80_000i64, -150_000] {
+            let (tr, new_gens, numbered) = feed(40.0, |_| 0.0, 20.0, step);
+            assert_eq!((tr.generation, new_gens), (1, 0), "step {}", step);
+            assert!(tr.bends >= 1, "step {}", step);
+            assert!(numbered, "step {}", step);
+        }
+    }
+
+    #[test]
+    fn a_moved_grid_starts_a_new_generation() {
+        // A beacon restart: the grid lands anywhere.
+        for step in [300_000i64, 3_000_000, -5_000_000] {
+            let (tr, new_gens, _) = feed(40.0, |_| 0.0, 20.0, step);
+            assert_eq!((tr.generation, new_gens, tr.bends), (2, 1, 0), "step {}", step);
+            assert!(tr.gen_published, "step {}", step);
+        }
     }
 }
